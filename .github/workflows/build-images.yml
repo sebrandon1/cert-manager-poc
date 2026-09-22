@@ -16,7 +16,7 @@ on:
         required: true
         default: master
       image_tag:
-        description: Image tag; use auto for a date and source-SHA tag
+        description: Override tag for every image; use auto for readable ref-SHA tags
         required: true
         default: auto
 
@@ -66,7 +66,7 @@ jobs:
           path: cert-manager-operator
           fetch-depth: 1
 
-      - name: Resolve source commits and image tag
+      - name: Resolve source commits and image tags
         shell: bash
         run: |
           set -euo pipefail
@@ -75,23 +75,40 @@ jobs:
           recert_sha="$(git -C recert rev-parse HEAD)"
           cert_manager_sha="$(git -C cert-manager-operator rev-parse HEAD)"
 
+          ref_label() {
+            local ref="${1##*/}"
+            if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+              ref=sha
+            fi
+            ref="${ref//[^A-Za-z0-9_.-]/-}"
+            printf '%s' "$ref"
+          }
+
           image_tag="${{ inputs.image_tag }}"
           if [[ "$image_tag" == auto ]]; then
-            image_tag="$(date -u +%Y%m%d)-${lifecycle_sha:0:7}-${recert_sha:0:7}-${cert_manager_sha:0:7}"
+            lifecycle_tag="$(ref_label '${{ inputs.lifecycle_ref }}')-${lifecycle_sha:0:6}"
+            recert_tag="$(ref_label '${{ inputs.recert_ref }}')-${recert_sha:0:6}"
+            cert_manager_tag="$(ref_label '${{ inputs.cert_manager_ref }}')-${cert_manager_sha:0:6}"
+          else
+            lifecycle_tag="$image_tag"
+            recert_tag="$image_tag"
+            cert_manager_tag="$image_tag"
           fi
 
           {
             echo "LIFECYCLE_SHA=$lifecycle_sha"
             echo "RECERT_SHA=$recert_sha"
             echo "CERT_MANAGER_SHA=$cert_manager_sha"
-            echo "IMAGE_TAG=$image_tag"
-            echo "RECERT_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/recert:$image_tag"
-            echo "CERT_MANAGER_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/cert-manager-operator:$image_tag"
-            echo "CERT_MANAGER_BUNDLE_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/cert-manager-operator-bundle:$image_tag"
-            echo "CERT_MANAGER_CATALOG_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/cert-manager-operator-catalog:$image_tag"
-            echo "LIFECYCLE_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/lifecycle-agent-operator:$image_tag"
-            echo "LIFECYCLE_BUNDLE_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/lifecycle-agent-operator-bundle:$image_tag"
-            echo "LIFECYCLE_CATALOG_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/lifecycle-agent-operator-catalog:$image_tag"
+            echo "LIFECYCLE_TAG=$lifecycle_tag"
+            echo "RECERT_TAG=$recert_tag"
+            echo "CERT_MANAGER_TAG=$cert_manager_tag"
+            echo "RECERT_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/recert:$recert_tag"
+            echo "CERT_MANAGER_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/cert-manager-operator:$cert_manager_tag"
+            echo "CERT_MANAGER_BUNDLE_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/cert-manager-operator-bundle:$cert_manager_tag"
+            echo "CERT_MANAGER_CATALOG_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/cert-manager-operator-catalog:$cert_manager_tag"
+            echo "LIFECYCLE_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/lifecycle-agent-operator:$lifecycle_tag"
+            echo "LIFECYCLE_BUNDLE_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/lifecycle-agent-operator-bundle:$lifecycle_tag"
+            echo "LIFECYCLE_CATALOG_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/lifecycle-agent-operator-catalog:$lifecycle_tag"
           } >> "$GITHUB_ENV"
 
           {
@@ -100,8 +117,10 @@ jobs:
             echo "- recert: `$recert_sha`"
             echo "- cert-manager-operator: `$cert_manager_sha`"
             echo ""
-            echo "### Image tag"
-            echo "`$image_tag`"
+            echo "### Image tags"
+            echo "- recert: \`$recert_tag\`"
+            echo "- lifecycle-agent: \`$lifecycle_tag\`"
+            echo "- cert-manager-operator: \`$cert_manager_tag\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up QEMU
