@@ -1,0 +1,262 @@
+name: Build and publish POC images
+
+on:
+  workflow_dispatch:
+    inputs:
+      lifecycle_ref:
+        description: lifecycle-agent ref (branch, tag, or SHA)
+        required: true
+        default: main
+      recert_ref:
+        description: recert ref (branch, tag, or SHA)
+        required: true
+        default: main
+      cert_manager_ref:
+        description: cert-manager-operator ref (branch, tag, or SHA)
+        required: true
+        default: master
+      image_tag:
+        description: Image tag; use auto for a date and source-SHA tag
+        required: true
+        default: auto
+
+permissions:
+  contents: read
+
+concurrency:
+  group: poc-image-build
+  cancel-in-progress: false
+
+env:
+  REGISTRY: quay.io
+  QUAY_NAMESPACE: bapalm
+  LIFECYCLE_REPOSITORY: openshift-kni/lifecycle-agent
+  RECERT_REPOSITORY: rh-ecosystem-edge/recert
+  CERT_MANAGER_REPOSITORY: openshift/cert-manager-operator
+  CERT_MANAGER_BUNDLE_VERSION: 1.20.0
+  LIFECYCLE_BUNDLE_VERSION: 5.1.0
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Check out lifecycle-agent
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.LIFECYCLE_REPOSITORY }}
+          ref: ${{ inputs.lifecycle_ref }}
+          path: lifecycle-agent
+          fetch-depth: 1
+
+      - name: Check out recert
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.RECERT_REPOSITORY }}
+          ref: ${{ inputs.recert_ref }}
+          path: recert
+          fetch-depth: 1
+
+      - name: Check out cert-manager-operator
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.CERT_MANAGER_REPOSITORY }}
+          ref: ${{ inputs.cert_manager_ref }}
+          path: cert-manager-operator
+          fetch-depth: 1
+
+      - name: Resolve source commits and image tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          lifecycle_sha="$(git -C lifecycle-agent rev-parse HEAD)"
+          recert_sha="$(git -C recert rev-parse HEAD)"
+          cert_manager_sha="$(git -C cert-manager-operator rev-parse HEAD)"
+
+          image_tag="${{ inputs.image_tag }}"
+          if [[ "$image_tag" == auto ]]; then
+            image_tag="$(date -u +%Y%m%d)-${lifecycle_sha:0:7}-${recert_sha:0:7}-${cert_manager_sha:0:7}"
+          fi
+
+          {
+            echo "LIFECYCLE_SHA=$lifecycle_sha"
+            echo "RECERT_SHA=$recert_sha"
+            echo "CERT_MANAGER_SHA=$cert_manager_sha"
+            echo "IMAGE_TAG=$image_tag"
+            echo "RECERT_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/recert:$image_tag"
+            echo "CERT_MANAGER_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/cert-manager-operator:$image_tag"
+            echo "CERT_MANAGER_BUNDLE_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/cert-manager-operator-bundle:$image_tag"
+            echo "CERT_MANAGER_CATALOG_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/cert-manager-operator-catalog:$image_tag"
+            echo "LIFECYCLE_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/lifecycle-agent-operator:$image_tag"
+            echo "LIFECYCLE_BUNDLE_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/lifecycle-agent-operator-bundle:$image_tag"
+            echo "LIFECYCLE_CATALOG_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/lifecycle-agent-operator-catalog:$image_tag"
+          } >> "$GITHUB_ENV"
+
+          {
+            echo "### Sources"
+            echo "- lifecycle-agent: `$lifecycle_sha`"
+            echo "- recert: `$recert_sha`"
+            echo "- cert-manager-operator: `$cert_manager_sha`"
+            echo ""
+            echo "### Image tag"
+            echo "`$image_tag`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Quay
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
+
+      - name: Build and publish recert
+        uses: docker/build-push-action@v7
+        with:
+          context: ./recert
+          file: ./recert/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.RECERT_IMAGE }}
+          cache-from: type=gha,scope=recert
+          cache-to: type=gha,mode=max,scope=recert
+          provenance: false
+          sbom: false
+
+      - name: Build and publish lifecycle-agent operator
+        uses: docker/build-push-action@v7
+        with:
+          context: ./lifecycle-agent
+          file: ./lifecycle-agent/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.LIFECYCLE_IMAGE }}
+          build-args: |
+            GIT_COMMIT=${{ env.LIFECYCLE_SHA }}
+            VERSION=${{ env.LIFECYCLE_BUNDLE_VERSION }}
+          cache-from: type=gha,scope=lifecycle-agent
+          cache-to: type=gha,mode=max,scope=lifecycle-agent
+          provenance: false
+          sbom: false
+
+      - name: Build and publish cert-manager operator
+        uses: docker/build-push-action@v7
+        with:
+          context: ./cert-manager-operator
+          file: ./cert-manager-operator/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.CERT_MANAGER_IMAGE }}
+          cache-from: type=gha,scope=cert-manager-operator
+          cache-to: type=gha,mode=max,scope=cert-manager-operator
+          provenance: false
+          sbom: false
+
+      - name: Generate operator bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          make -C cert-manager-operator bundle \
+            CONTAINER_ENGINE=docker \
+            IMG="$CERT_MANAGER_IMAGE" \
+            BUNDLE_IMG="$CERT_MANAGER_BUNDLE_IMAGE" \
+            BUNDLE_VERSION="$CERT_MANAGER_BUNDLE_VERSION"
+
+          make -C lifecycle-agent bundle \
+            ENGINE=docker \
+            IMG="$LIFECYCLE_IMAGE" \
+            BUNDLE_IMG="$LIFECYCLE_BUNDLE_IMAGE" \
+            VERSION="$LIFECYCLE_BUNDLE_VERSION"
+
+      - name: Build and publish cert-manager bundle
+        uses: docker/build-push-action@v7
+        with:
+          context: ./cert-manager-operator
+          file: ./cert-manager-operator/bundle.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.CERT_MANAGER_BUNDLE_IMAGE }}
+          cache-from: type=gha,scope=cert-manager-bundle
+          cache-to: type=gha,mode=max,scope=cert-manager-bundle
+          provenance: false
+          sbom: false
+
+      - name: Build and publish lifecycle-agent bundle
+        uses: docker/build-push-action@v7
+        with:
+          context: ./lifecycle-agent
+          file: ./lifecycle-agent/bundle.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.LIFECYCLE_BUNDLE_IMAGE }}
+          cache-from: type=gha,scope=lifecycle-bundle
+          cache-to: type=gha,mode=max,scope=lifecycle-bundle
+          provenance: false
+          sbom: false
+
+      - name: Build and publish multi-arch catalogs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          build_catalog() {
+            local directory="$1"
+            local bundle_image="$2"
+            local catalog_image="$3"
+            local catalog_image_amd64="${catalog_image}-amd64"
+            local catalog_image_arm64="${catalog_image}-arm64"
+
+            for arch in amd64 arm64; do
+              local arch_image="${catalog_image}-${arch}"
+              export DOCKER_DEFAULT_PLATFORM="linux/$arch"
+
+              if [[ "$directory" == cert-manager-operator ]]; then
+                make -C "$directory" catalog-build \
+                  CONTAINER_ENGINE=docker \
+                  CATALOG_VERSION="$CERT_MANAGER_BUNDLE_VERSION" \
+                  BUNDLE_IMG="$bundle_image" \
+                  CATALOG_IMG="$arch_image"
+              else
+                make -C "$directory" catalog-build \
+                  ENGINE=docker \
+                  VERSION="$LIFECYCLE_BUNDLE_VERSION" \
+                  BUNDLE_IMGS="$bundle_image" \
+                  CATALOG_IMG="$arch_image"
+              fi
+
+              docker push "$arch_image"
+            done
+
+            unset DOCKER_DEFAULT_PLATFORM
+            docker buildx imagetools create \
+              --tag "$catalog_image" \
+              "$catalog_image_amd64" \
+              "$catalog_image_arm64"
+          }
+
+          build_catalog cert-manager-operator "$CERT_MANAGER_BUNDLE_IMAGE" "$CERT_MANAGER_CATALOG_IMAGE"
+          build_catalog lifecycle-agent "$LIFECYCLE_BUNDLE_IMAGE" "$LIFECYCLE_CATALOG_IMAGE"
+
+      - name: Publish build summary
+        shell: bash
+        run: |
+          {
+            echo "### Published images"
+            echo "- `$RECERT_IMAGE`"
+            echo "- `$CERT_MANAGER_IMAGE`"
+            echo "- `$CERT_MANAGER_BUNDLE_IMAGE`"
+            echo "- `$CERT_MANAGER_CATALOG_IMAGE`"
+            echo "- `$LIFECYCLE_IMAGE`"
+            echo "- `$LIFECYCLE_BUNDLE_IMAGE`"
+            echo "- `$LIFECYCLE_CATALOG_IMAGE`"
+          } >> "$GITHUB_STEP_SUMMARY"
