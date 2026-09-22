@@ -223,6 +223,35 @@ jobs:
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_TOKEN }}
 
+      - name: Prepare public architecture-specific OpenShift CLI image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p lifecycle-agent-cli
+          if [[ "${{ matrix.arch }}" == "amd64" ]]; then
+            cli_url=https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz
+          else
+            cli_url=https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux-arm64.tar.gz
+          fi
+
+          curl --fail --location --retry 5 "$cli_url" | tar --extract --gzip --file=- --directory lifecycle-agent-cli oc
+          cat > lifecycle-agent-cli/Dockerfile <<'EOF'
+          FROM scratch
+          COPY oc /usr/bin/oc
+          EOF
+
+      - name: Build and publish public OpenShift CLI image
+        uses: docker/build-push-action@v7
+        with:
+          context: ./lifecycle-agent-cli
+          file: ./lifecycle-agent-cli/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          tags: ${{ needs.resolve-sources.outputs.lifecycle_image }}-cli-${{ matrix.arch }}
+          provenance: false
+          sbom: false
+
       - name: Build and publish lifecycle-agent architecture image
         uses: docker/build-push-action@v7
         with:
@@ -234,6 +263,7 @@ jobs:
           build-args: |
             GIT_COMMIT=${{ needs.resolve-sources.outputs.lifecycle_sha }}
             VERSION=${{ env.LIFECYCLE_BUNDLE_VERSION }}
+            OPENSHIFT_CLI_IMAGE=${{ needs.resolve-sources.outputs.lifecycle_image }}-cli-${{ matrix.arch }}
           cache-from: type=gha,scope=lifecycle-agent-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=lifecycle-agent-${{ matrix.arch }}
           provenance: false
