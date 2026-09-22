@@ -40,10 +40,20 @@ env:
   LIFECYCLE_BUNDLE_VERSION: 5.1.0
 
 jobs:
-  build-and-publish:
+  resolve-sources:
+    name: Resolve sources and image tags
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
-
+    outputs:
+      lifecycle_sha: ${{ steps.resolve.outputs.lifecycle_sha }}
+      recert_sha: ${{ steps.resolve.outputs.recert_sha }}
+      cert_manager_sha: ${{ steps.resolve.outputs.cert_manager_sha }}
+      lifecycle_image: ${{ steps.resolve.outputs.lifecycle_image }}
+      recert_image: ${{ steps.resolve.outputs.recert_image }}
+      cert_manager_image: ${{ steps.resolve.outputs.cert_manager_image }}
+      lifecycle_bundle_image: ${{ steps.resolve.outputs.lifecycle_bundle_image }}
+      lifecycle_catalog_image: ${{ steps.resolve.outputs.lifecycle_catalog_image }}
+      cert_manager_bundle_image: ${{ steps.resolve.outputs.cert_manager_bundle_image }}
+      cert_manager_catalog_image: ${{ steps.resolve.outputs.cert_manager_catalog_image }}
     steps:
       - name: Check out lifecycle-agent
         uses: actions/checkout@v6
@@ -69,7 +79,8 @@ jobs:
           path: cert-manager-operator
           fetch-depth: 1
 
-      - name: Resolve source commits and image tags
+      - name: Resolve commits and tags
+        id: resolve
         shell: bash
         run: |
           set -euo pipefail
@@ -91,6 +102,7 @@ jobs:
           recert_ref="${{ inputs.recert_ref || 'main' }}"
           cert_manager_ref="${{ inputs.cert_manager_ref || 'master' }}"
           image_tag="${{ inputs.image_tag || 'auto' }}"
+
           if [[ "$image_tag" == auto ]]; then
             lifecycle_tag="$(ref_label "$lifecycle_ref")-${lifecycle_sha:0:6}"
             recert_tag="$(ref_label "$recert_ref")-${recert_sha:0:6}"
@@ -101,21 +113,26 @@ jobs:
             cert_manager_tag="$image_tag"
           fi
 
+          lifecycle_image="${REGISTRY}/${QUAY_NAMESPACE}/lifecycle-agent-operator:${lifecycle_tag}"
+          recert_image="${REGISTRY}/${QUAY_NAMESPACE}/recert:${recert_tag}"
+          cert_manager_image="${REGISTRY}/${QUAY_NAMESPACE}/cert-manager-operator:${cert_manager_tag}"
+          lifecycle_bundle_image="${REGISTRY}/${QUAY_NAMESPACE}/lifecycle-agent-operator-bundle:${lifecycle_tag}"
+          lifecycle_catalog_image="${REGISTRY}/${QUAY_NAMESPACE}/lifecycle-agent-operator-catalog:${lifecycle_tag}"
+          cert_manager_bundle_image="${REGISTRY}/${QUAY_NAMESPACE}/cert-manager-operator-bundle:${cert_manager_tag}"
+          cert_manager_catalog_image="${REGISTRY}/${QUAY_NAMESPACE}/cert-manager-operator-catalog:${cert_manager_tag}"
+
           {
-            echo "LIFECYCLE_SHA=$lifecycle_sha"
-            echo "RECERT_SHA=$recert_sha"
-            echo "CERT_MANAGER_SHA=$cert_manager_sha"
-            echo "LIFECYCLE_TAG=$lifecycle_tag"
-            echo "RECERT_TAG=$recert_tag"
-            echo "CERT_MANAGER_TAG=$cert_manager_tag"
-            echo "RECERT_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/recert:$recert_tag"
-            echo "CERT_MANAGER_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/cert-manager-operator:$cert_manager_tag"
-            echo "CERT_MANAGER_BUNDLE_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/cert-manager-operator-bundle:$cert_manager_tag"
-            echo "CERT_MANAGER_CATALOG_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/cert-manager-operator-catalog:$cert_manager_tag"
-            echo "LIFECYCLE_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/lifecycle-agent-operator:$lifecycle_tag"
-            echo "LIFECYCLE_BUNDLE_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/lifecycle-agent-operator-bundle:$lifecycle_tag"
-            echo "LIFECYCLE_CATALOG_IMAGE=${REGISTRY}/${QUAY_NAMESPACE}/lifecycle-agent-operator-catalog:$lifecycle_tag"
-          } >> "$GITHUB_ENV"
+            echo "lifecycle_sha=$lifecycle_sha"
+            echo "recert_sha=$recert_sha"
+            echo "cert_manager_sha=$cert_manager_sha"
+            echo "lifecycle_image=$lifecycle_image"
+            echo "recert_image=$recert_image"
+            echo "cert_manager_image=$cert_manager_image"
+            echo "lifecycle_bundle_image=$lifecycle_bundle_image"
+            echo "lifecycle_catalog_image=$lifecycle_catalog_image"
+            echo "cert_manager_bundle_image=$cert_manager_bundle_image"
+            echo "cert_manager_catalog_image=$cert_manager_catalog_image"
+          } >> "$GITHUB_OUTPUT"
 
           {
             echo "### Sources"
@@ -123,16 +140,33 @@ jobs:
             echo "- recert: \`$recert_sha\`"
             echo "- cert-manager-operator: \`$cert_manager_sha\`"
             echo ""
-            echo "### Image tags"
-            echo "- recert: \`$recert_tag\`"
-            echo "- lifecycle-agent: \`$lifecycle_tag\`"
-            echo "- cert-manager-operator: \`$cert_manager_tag\`"
+            echo "### Final image tags"
+            echo "- recert: \`$recert_image\`"
+            echo "- lifecycle-agent: \`$lifecycle_image\`"
+            echo "- cert-manager-operator: \`$cert_manager_image\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+  build-recert:
+    name: Build recert (${{ matrix.arch }})
+    needs: resolve-sources
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    steps:
+      - name: Check out recert
+        uses: actions/checkout@v6
         with:
-          platforms: arm64
+          repository: ${{ env.RECERT_REPOSITORY }}
+          ref: ${{ needs.resolve-sources.outputs.recert_sha }}
+          path: recert
+          fetch-depth: 1
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -144,50 +178,188 @@ jobs:
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_TOKEN }}
 
-      - name: Build and publish recert
+      - name: Build and publish recert architecture image
         uses: docker/build-push-action@v7
         with:
           context: ./recert
           file: ./recert/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/${{ matrix.arch }}
           push: true
-          tags: ${{ env.RECERT_IMAGE }}
-          cache-from: type=gha,scope=recert
-          cache-to: type=gha,mode=max,scope=recert
+          tags: ${{ needs.resolve-sources.outputs.recert_image }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=recert-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=recert-${{ matrix.arch }}
           provenance: false
           sbom: false
 
-      - name: Build and publish lifecycle-agent operator
+  build-lifecycle-agent:
+    name: Build lifecycle-agent (${{ matrix.arch }})
+    needs: resolve-sources
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    steps:
+      - name: Check out lifecycle-agent
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.LIFECYCLE_REPOSITORY }}
+          ref: ${{ needs.resolve-sources.outputs.lifecycle_sha }}
+          path: lifecycle-agent
+          fetch-depth: 1
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Quay
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
+
+      - name: Build and publish lifecycle-agent architecture image
         uses: docker/build-push-action@v7
         with:
           context: ./lifecycle-agent
           file: ./lifecycle-agent/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/${{ matrix.arch }}
           push: true
-          tags: ${{ env.LIFECYCLE_IMAGE }}
+          tags: ${{ needs.resolve-sources.outputs.lifecycle_image }}-${{ matrix.arch }}
           build-args: |
-            GIT_COMMIT=${{ env.LIFECYCLE_SHA }}
+            GIT_COMMIT=${{ needs.resolve-sources.outputs.lifecycle_sha }}
             VERSION=${{ env.LIFECYCLE_BUNDLE_VERSION }}
-          cache-from: type=gha,scope=lifecycle-agent
-          cache-to: type=gha,mode=max,scope=lifecycle-agent
+          cache-from: type=gha,scope=lifecycle-agent-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=lifecycle-agent-${{ matrix.arch }}
           provenance: false
           sbom: false
 
-      - name: Build and publish cert-manager operator
+  build-cert-manager-operator:
+    name: Build cert-manager-operator (${{ matrix.arch }})
+    needs: resolve-sources
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    steps:
+      - name: Check out cert-manager-operator
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.CERT_MANAGER_REPOSITORY }}
+          ref: ${{ needs.resolve-sources.outputs.cert_manager_sha }}
+          path: cert-manager-operator
+          fetch-depth: 1
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Quay
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
+
+      - name: Build and publish cert-manager architecture image
         uses: docker/build-push-action@v7
         with:
           context: ./cert-manager-operator
           file: ./cert-manager-operator/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/${{ matrix.arch }}
           push: true
-          tags: ${{ env.CERT_MANAGER_IMAGE }}
-          cache-from: type=gha,scope=cert-manager-operator
-          cache-to: type=gha,mode=max,scope=cert-manager-operator
+          tags: ${{ needs.resolve-sources.outputs.cert_manager_image }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=cert-manager-operator-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=cert-manager-operator-${{ matrix.arch }}
           provenance: false
           sbom: false
 
+  publish-runtime-manifests:
+    name: Publish runtime multi-arch manifests
+    needs:
+      - resolve-sources
+      - build-recert
+      - build-lifecycle-agent
+      - build-cert-manager-operator
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Quay
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
+
+      - name: Combine architecture images
+        shell: bash
+        env:
+          RECERT_IMAGE: ${{ needs.resolve-sources.outputs.recert_image }}
+          LIFECYCLE_IMAGE: ${{ needs.resolve-sources.outputs.lifecycle_image }}
+          CERT_MANAGER_IMAGE: ${{ needs.resolve-sources.outputs.cert_manager_image }}
+        run: |
+          set -euo pipefail
+
+          for image in "$RECERT_IMAGE" "$LIFECYCLE_IMAGE" "$CERT_MANAGER_IMAGE"; do
+            docker buildx imagetools create \
+              --tag "$image" \
+              "${image}-amd64" \
+              "${image}-arm64"
+          done
+
+  build-bundles-and-catalogs:
+    name: Build bundles and catalogs
+    needs:
+      - resolve-sources
+      - publish-runtime-manifests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Check out lifecycle-agent
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.LIFECYCLE_REPOSITORY }}
+          ref: ${{ needs.resolve-sources.outputs.lifecycle_sha }}
+          path: lifecycle-agent
+          fetch-depth: 1
+
+      - name: Check out cert-manager-operator
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.CERT_MANAGER_REPOSITORY }}
+          ref: ${{ needs.resolve-sources.outputs.cert_manager_sha }}
+          path: cert-manager-operator
+          fetch-depth: 1
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Quay
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
+
       - name: Generate operator bundles
         shell: bash
+        env:
+          LIFECYCLE_IMAGE: ${{ needs.resolve-sources.outputs.lifecycle_image }}
+          LIFECYCLE_BUNDLE_IMAGE: ${{ needs.resolve-sources.outputs.lifecycle_bundle_image }}
+          CERT_MANAGER_IMAGE: ${{ needs.resolve-sources.outputs.cert_manager_image }}
+          CERT_MANAGER_BUNDLE_IMAGE: ${{ needs.resolve-sources.outputs.cert_manager_bundle_image }}
         run: |
           set -euo pipefail
 
@@ -210,7 +382,7 @@ jobs:
           file: ./cert-manager-operator/bundle.Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ env.CERT_MANAGER_BUNDLE_IMAGE }}
+          tags: ${{ needs.resolve-sources.outputs.cert_manager_bundle_image }}
           cache-from: type=gha,scope=cert-manager-bundle
           cache-to: type=gha,mode=max,scope=cert-manager-bundle
           provenance: false
@@ -223,7 +395,7 @@ jobs:
           file: ./lifecycle-agent/bundle.Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ env.LIFECYCLE_BUNDLE_IMAGE }}
+          tags: ${{ needs.resolve-sources.outputs.lifecycle_bundle_image }}
           cache-from: type=gha,scope=lifecycle-bundle
           cache-to: type=gha,mode=max,scope=lifecycle-bundle
           provenance: false
@@ -231,6 +403,11 @@ jobs:
 
       - name: Build and publish multi-arch catalogs
         shell: bash
+        env:
+          CERT_MANAGER_BUNDLE_IMAGE: ${{ needs.resolve-sources.outputs.cert_manager_bundle_image }}
+          CERT_MANAGER_CATALOG_IMAGE: ${{ needs.resolve-sources.outputs.cert_manager_catalog_image }}
+          LIFECYCLE_BUNDLE_IMAGE: ${{ needs.resolve-sources.outputs.lifecycle_bundle_image }}
+          LIFECYCLE_CATALOG_IMAGE: ${{ needs.resolve-sources.outputs.lifecycle_catalog_image }}
         run: |
           set -euo pipefail
 
@@ -238,8 +415,6 @@ jobs:
             local directory="$1"
             local bundle_image="$2"
             local catalog_image="$3"
-            local catalog_image_amd64="${catalog_image}-amd64"
-            local catalog_image_arm64="${catalog_image}-arm64"
 
             for arch in amd64 arm64; do
               local arch_image="${catalog_image}-${arch}"
@@ -265,15 +440,22 @@ jobs:
             unset DOCKER_DEFAULT_PLATFORM
             docker buildx imagetools create \
               --tag "$catalog_image" \
-              "$catalog_image_amd64" \
-              "$catalog_image_arm64"
+              "${catalog_image}-amd64" \
+              "${catalog_image}-arm64"
           }
 
           build_catalog cert-manager-operator "$CERT_MANAGER_BUNDLE_IMAGE" "$CERT_MANAGER_CATALOG_IMAGE"
           build_catalog lifecycle-agent "$LIFECYCLE_BUNDLE_IMAGE" "$LIFECYCLE_CATALOG_IMAGE"
 
       - name: Publish build summary
-        shell: bash
+        env:
+          RECERT_IMAGE: ${{ needs.resolve-sources.outputs.recert_image }}
+          CERT_MANAGER_IMAGE: ${{ needs.resolve-sources.outputs.cert_manager_image }}
+          CERT_MANAGER_BUNDLE_IMAGE: ${{ needs.resolve-sources.outputs.cert_manager_bundle_image }}
+          CERT_MANAGER_CATALOG_IMAGE: ${{ needs.resolve-sources.outputs.cert_manager_catalog_image }}
+          LIFECYCLE_IMAGE: ${{ needs.resolve-sources.outputs.lifecycle_image }}
+          LIFECYCLE_BUNDLE_IMAGE: ${{ needs.resolve-sources.outputs.lifecycle_bundle_image }}
+          LIFECYCLE_CATALOG_IMAGE: ${{ needs.resolve-sources.outputs.lifecycle_catalog_image }}
         run: |
           {
             echo "### Published images"
