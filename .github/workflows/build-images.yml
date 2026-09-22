@@ -1,6 +1,9 @@
 name: Build and publish POC images
 
 on:
+  schedule:
+    # 06:00 UTC = midnight CST / 01:00 CDT.
+    - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
       lifecycle_ref:
@@ -46,7 +49,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: ${{ env.LIFECYCLE_REPOSITORY }}
-          ref: ${{ inputs.lifecycle_ref }}
+          ref: ${{ inputs.lifecycle_ref || 'main' }}
           path: lifecycle-agent
           fetch-depth: 1
 
@@ -54,7 +57,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: ${{ env.RECERT_REPOSITORY }}
-          ref: ${{ inputs.recert_ref }}
+          ref: ${{ inputs.recert_ref || 'main' }}
           path: recert
           fetch-depth: 1
 
@@ -62,7 +65,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: ${{ env.CERT_MANAGER_REPOSITORY }}
-          ref: ${{ inputs.cert_manager_ref }}
+          ref: ${{ inputs.cert_manager_ref || 'master' }}
           path: cert-manager-operator
           fetch-depth: 1
 
@@ -84,11 +87,14 @@ jobs:
             printf '%s' "$ref"
           }
 
-          image_tag="${{ inputs.image_tag }}"
+          lifecycle_ref="${{ inputs.lifecycle_ref || 'main' }}"
+          recert_ref="${{ inputs.recert_ref || 'main' }}"
+          cert_manager_ref="${{ inputs.cert_manager_ref || 'master' }}"
+          image_tag="${{ inputs.image_tag || 'auto' }}"
           if [[ "$image_tag" == auto ]]; then
-            lifecycle_tag="$(ref_label '${{ inputs.lifecycle_ref }}')-${lifecycle_sha:0:6}"
-            recert_tag="$(ref_label '${{ inputs.recert_ref }}')-${recert_sha:0:6}"
-            cert_manager_tag="$(ref_label '${{ inputs.cert_manager_ref }}')-${cert_manager_sha:0:6}"
+            lifecycle_tag="$(ref_label "$lifecycle_ref")-${lifecycle_sha:0:6}"
+            recert_tag="$(ref_label "$recert_ref")-${recert_sha:0:6}"
+            cert_manager_tag="$(ref_label "$cert_manager_ref")-${cert_manager_sha:0:6}"
           else
             lifecycle_tag="$image_tag"
             recert_tag="$image_tag"
@@ -113,9 +119,9 @@ jobs:
 
           {
             echo "### Sources"
-            echo "- lifecycle-agent: `$lifecycle_sha`"
-            echo "- recert: `$recert_sha`"
-            echo "- cert-manager-operator: `$cert_manager_sha`"
+            echo "- lifecycle-agent: \`$lifecycle_sha\`"
+            echo "- recert: \`$recert_sha\`"
+            echo "- cert-manager-operator: \`$cert_manager_sha\`"
             echo ""
             echo "### Image tags"
             echo "- recert: \`$recert_tag\`"
@@ -271,11 +277,11 @@ jobs:
         run: |
           {
             echo "### Published images"
-            echo "- `$RECERT_IMAGE`"
-            echo "- `$CERT_MANAGER_IMAGE`"
-            echo "- `$CERT_MANAGER_BUNDLE_IMAGE`"
-            echo "- `$CERT_MANAGER_CATALOG_IMAGE`"
-            echo "- `$LIFECYCLE_IMAGE`"
-            echo "- `$LIFECYCLE_BUNDLE_IMAGE`"
-            echo "- `$LIFECYCLE_CATALOG_IMAGE`"
+            echo "- \`$RECERT_IMAGE\`"
+            echo "- \`$CERT_MANAGER_IMAGE\`"
+            echo "- \`$CERT_MANAGER_BUNDLE_IMAGE\`"
+            echo "- \`$CERT_MANAGER_CATALOG_IMAGE\`"
+            echo "- \`$LIFECYCLE_IMAGE\`"
+            echo "- \`$LIFECYCLE_BUNDLE_IMAGE\`"
+            echo "- \`$LIFECYCLE_CATALOG_IMAGE\`"
           } >> "$GITHUB_STEP_SUMMARY"
