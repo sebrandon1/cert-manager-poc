@@ -29,126 +29,27 @@ export CERT_MANAGER_BUNDLE_IMAGE=quay.io/bapalm/cert-manager-operator-bundle:mas
 export CERT_MANAGER_CATALOG_IMAGE=quay.io/bapalm/cert-manager-operator-catalog:master-a5aacc
 ```
 
-The tag format is `<source-ref>-<first-six-characters-of-source-SHA>`. Pull
-request refs use `pr-<number>` (or `pr-<number>-merge`) as the source label.
-When a new build completes, copy the image references from its workflow summary
-and replace the variables above.
+The tag format is `<source-ref>-<first-six-characters-of-source-SHA>`. When a
+new build completes, copy the image references from its workflow summary and
+replace the variables above.
 
-## Test feature branches and pull requests
+---
 
-The workflow accepts an independent source ref for each upstream repository.
-Use a normal branch name when the branch exists in the upstream repository. For
-pull requests from forks, use the pull-request ref from the upstream repository:
+## Scenario A: ECDSA/RSA certificate preservation across IBU
 
-- `pull/<number>/head` builds the contributor's PR head commit.
-- `pull/<number>/merge` builds GitHub's synthetic PR merge commit.
+This scenario validates that cert-manager-issued ECDSA and RSA certificates
+survive an image-based upgrade. It exercises both
+[cert-manager-operator PR #424](https://github.com/openshift/cert-manager-operator/pull/424)
+(consoleless support) and
+[recert PR #1758](https://github.com/rh-ecosystem-edge/recert/pull/1758)
+(ECDSA PKCS#8 handling during post-pivot recert).
 
-The default for feature validation is `head`, because it tests the feature code
-without adding unrelated changes from the base branch. The current PRs of
-interest are:
+### Prerequisites
 
-| Component | PR | Test ref |
-| --- | --- | --- |
-| cert-manager-operator | [#424](https://github.com/openshift/cert-manager-operator/pull/424) | `pull/424/head` |
-| recert | [#1758](https://github.com/rh-ecosystem-edge/recert/pull/1758) | `pull/1758/head` |
-
-### Dispatch a feature build
-
-From the repository root, dispatch the workflow with the desired ref for each
-component. This example builds both feature PRs while keeping lifecycle-agent
-on upstream `main`:
-
-```bash
-gh workflow run build-images.yml \
-  --repo sebrandon1/cert-manager-poc \
-  --ref main \
-  --field lifecycle_ref=main \
-  --field recert_ref=pull/1758/head \
-  --field cert_manager_ref=pull/424/head \
-  --field image_tag=auto
-```
-
-The same inputs are available under **Actions → Build and publish POC images →
-Run workflow**. Leave `image_tag` set to `auto`; it keeps builds from different
-branches from overwriting one another.
-
-Monitor the run and open its summary when it completes:
-
-```bash
-gh run list --repo sebrandon1/cert-manager-poc \
-  --workflow build-images.yml --limit 1
-gh run view RUN_ID --repo sebrandon1/cert-manager-poc --web
-```
-
-For automatic tags, PR refs become readable tags such as
-`pr-424-<sha>` and `pr-1758-<sha>`, while the unchanged lifecycle-agent build
-uses `main-<sha>`. The six-character SHA is resolved from the exact commit that
-was checked out. Always use the final image references from the workflow
-summary, not a guessed SHA.
-
-### Install the feature images on a spoke
-
-For a disposable spoke, copy the image variables from the workflow summary and
-then use the installation manifests in this README. Set the catalog images to
-the feature-build catalog tags before applying them:
-
-```bash
-export CERT_MANAGER_CATALOG_IMAGE=quay.io/bapalm/cert-manager-operator-catalog:pr-424-<sha>
-export LIFECYCLE_CATALOG_IMAGE=quay.io/bapalm/lifecycle-agent-operator-catalog:main-<sha>
-export RECERT_IMAGE=quay.io/bapalm/recert:pr-1758-<sha>
-```
-
-In `catalogs-and-namespaces.yaml`, replace the two CatalogSource image values
-with `CERT_MANAGER_CATALOG_IMAGE` and `LIFECYCLE_CATALOG_IMAGE`, then apply and
-wait for both CatalogSources to become ready as described below. Confirm that
-the feature packages are visible before creating the Subscriptions:
-
-```bash
-oc -n openshift-marketplace get catalogsource
-oc -n openshift-marketplace get packagemanifest \
-  cert-manager-operator lifecycle-agent
-```
-
-After the operators install, verify that the CSVs and deployments are healthy
-and that the resolved images match the feature tags. Configure recert on the
-IBU object with the feature image:
-
-```bash
-oc annotate imagebasedupgrade upgrade \
-  lca.openshift.io/recert-image="$RECERT_IMAGE" --overwrite
-oc get imagebasedupgrade upgrade \
-  -o jsonpath='{.metadata.annotations.lca\.openshift\.io/recert-image}{"\n"}'
-```
-
-The complete ECDSA and IBU verification procedures remain in the sections
-below. Record the workflow run URL, source SHAs, image tags, CSV versions, and
-IBU status with the test results.
-
-When reusing a spoke, remember that a feature build may retain the same CSV
-version as the default build. A fresh disposable spoke is preferred; otherwise
-uninstall the previous test installation according to your cluster's normal
-procedure before switching CatalogSources.
-
-### Deploy feature catalogs through ACM
-
-For hub/spoke testing, update the two CatalogSource image values in the ACM
-policy or PolicyGenerator input to the feature catalog tags, apply the policy
-on the hub, and wait for compliance on the selected spokes. Keep the recert
-image override in the spoke-facing IBU resource or policy. Catalog delivery and
-operator health must be verified on the spoke; hub policy compliance alone does
-not prove that OLM installed the feature bundles.
-
-## Prerequisites
-
-- OpenShift 4.19 or newer, preferably a disposable SNO spoke.
+- OpenShift 4.19 or newer SNO spoke, preferably disposable.
+- A seed image at the target version (see [Seed image creation](#seed-image-creation)).
+- OADP / Velero installed and a working `DataProtectionApplication` on the spoke.
 - `oc` logged in with cluster-admin privileges.
-- An ACM hub if using the hub/spoke deployment path.
-- A Quay pull secret only if the repositories are private. The examples assume
-  the images can be pulled anonymously.
-
-The examples below use `SPOKE_KUBECONFIG` as a placeholder for the spoke
-kubeconfig. Run the commands against the spoke unless a section says to use
-the hub.
 
 ```bash
 export KUBECONFIG="$SPOKE_KUBECONFIG"
@@ -156,10 +57,9 @@ oc whoami
 oc version
 ```
 
-## Install directly on a spoke
+### Step 1: Set up CatalogSources and namespaces
 
-The catalogs contain the generated OLM bundles. Create the catalog sources,
-operator namespaces, and operator groups first:
+Apply the catalog sources, namespaces, and operator groups in a single manifest:
 
 ```yaml
 apiVersion: v1
@@ -217,12 +117,8 @@ spec:
       interval: 10m
 ```
 
-Apply it and wait for both catalogs to become ready:
-
 ```bash
 oc apply -f catalogs-and-namespaces.yaml
-oc -n openshift-marketplace get catalogsource \
-  bapalm-cert-manager-poc bapalm-lifecycle-agent-poc
 oc -n openshift-marketplace wait --for=condition=READY \
   catalogsource/bapalm-cert-manager-poc --timeout=5m
 oc -n openshift-marketplace wait --for=condition=READY \
@@ -231,22 +127,9 @@ oc -n openshift-marketplace get packagemanifest \
   cert-manager-operator lifecycle-agent
 ```
 
-Install both operators through subscriptions. The cert-manager bundle exposes
-`stable-v1` and `stable-v1.20`; the lifecycle-agent bundle exposes `alpha`.
+### Step 2: Install lifecycle-agent operator
 
 ```yaml
-apiVersion: operators.coreos.com/v1alpha1
-kind: Subscription
-metadata:
-  name: cert-manager-operator
-  namespace: cert-manager-operator
-spec:
-  channel: stable-v1
-  name: cert-manager-operator
-  source: bapalm-cert-manager-poc
-  sourceNamespace: openshift-marketplace
-  installPlanApproval: Automatic
----
 apiVersion: operators.coreos.com/v1alpha1
 kind: Subscription
 metadata:
@@ -261,49 +144,41 @@ spec:
 ```
 
 ```bash
-oc apply -f subscriptions.yaml
-oc -n cert-manager-operator get subscription,installplan,csv
+oc apply -f subscription-lca.yaml
 oc -n openshift-lifecycle-agent get subscription,installplan,csv
-oc -n cert-manager-operator get deploy,pods
-oc -n openshift-lifecycle-agent get deploy,pods
+oc -n openshift-lifecycle-agent rollout status deploy/lifecycle-agent-controller-manager
 ```
 
-The expected CSVs are `cert-manager-operator.v1.20.0` and
-`lifecycle-agent.v5.1.0`. Confirm that the deployments resolve the intended
-images before continuing:
+Confirm the deployment uses the expected image:
 
 ```bash
-oc -n cert-manager-operator get deploy -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.template.spec.containers[*].image}{"\n"}{end}'
-oc -n openshift-lifecycle-agent get deploy -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.template.spec.containers[*].image}{"\n"}{end}'
+oc -n openshift-lifecycle-agent get deploy lifecycle-agent-controller-manager \
+  -o jsonpath='{.spec.template.spec.containers[*].image}{"\n"}'
 ```
 
-## Optional private Quay pull credentials
+### Step 3: Install cert-manager-operator
 
-If the POC repositories are private, create a registry secret on the spoke and
-link it to the operator service accounts. Catalog sources may additionally
-need the secret in `openshift-marketplace` and in `spec.secrets`.
+```yaml
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: cert-manager-operator
+  namespace: cert-manager-operator
+spec:
+  channel: stable-v1
+  name: cert-manager-operator
+  source: bapalm-cert-manager-poc
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic
+```
 
 ```bash
-oc -n cert-manager-operator create secret docker-registry bapalm-quay-pull \
-  --docker-server=quay.io \
-  --docker-username="$QUAY_USERNAME" \
-  --docker-password="$QUAY_TOKEN"
-oc -n cert-manager-operator secrets link cert-manager-operator-controller-manager \
-  bapalm-quay-pull --for=pull
-
-oc -n openshift-lifecycle-agent create secret docker-registry bapalm-quay-pull \
-  --docker-server=quay.io \
-  --docker-username="$QUAY_USERNAME" \
-  --docker-password="$QUAY_TOKEN"
-oc -n openshift-lifecycle-agent secrets link lifecycle-agent-controller-manager \
-  bapalm-quay-pull --for=pull
+oc apply -f subscription-cert-manager.yaml
+oc -n cert-manager-operator get subscription,installplan,csv
+oc -n cert-manager-operator rollout status deploy/cert-manager-operator-controller-manager
 ```
 
-Do not commit registry credentials to this repository or to ACM policies.
-
-## Configure cert-manager
-
-Create the singleton `CertManager` resource after the operator is healthy:
+Create the singleton `CertManager` resource:
 
 ```yaml
 apiVersion: operator.openshift.io/v1alpha1
@@ -317,12 +192,15 @@ spec:
 
 ```bash
 oc apply -f cert-manager.yaml
-oc get certmanager cluster -o yaml
 oc -n cert-manager get deploy,pods
+oc -n cert-manager rollout status deploy/cert-manager
+oc -n cert-manager rollout status deploy/cert-manager-webhook
+oc -n cert-manager rollout status deploy/cert-manager-cainjector
 ```
 
-For a consoleless functional check, issue an ECDSA certificate using a
-self-signed issuer:
+### Step 4: Create test certificates (ECDSA and RSA)
+
+Create a self-signed issuer and one certificate of each key type:
 
 ```yaml
 apiVersion: v1
@@ -341,60 +219,81 @@ spec:
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: ecdsa-test
+  name: test-ecdsa
   namespace: cert-manager-poc
 spec:
-  secretName: ecdsa-test-tls
-  commonName: ecdsa-test.example.com
+  secretName: test-ecdsa-tls
+  commonName: test-ecdsa.example.com
   dnsNames:
-  - ecdsa-test.example.com
+  - test-ecdsa.example.com
   issuerRef:
     name: selfsigned
     kind: Issuer
   privateKey:
     algorithm: ECDSA
     size: 256
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: test-rsa
+  namespace: cert-manager-poc
+spec:
+  secretName: test-rsa-tls
+  commonName: test-rsa.example.com
+  dnsNames:
+  - test-rsa.example.com
+  issuerRef:
+    name: selfsigned
+    kind: Issuer
+  privateKey:
+    algorithm: RSA
+    size: 2048
 ```
 
 ```bash
-oc apply -f ecdsa-certificate.yaml
-oc -n cert-manager-poc wait --for=condition=Ready certificate/ecdsa-test --timeout=5m
-oc -n cert-manager-poc get certificate ecdsa-test -o wide
-oc -n cert-manager-poc get secret ecdsa-test-tls -o jsonpath='{.data.tls\.key}' | base64 -d | openssl pkey -text -noout
+oc apply -f test-certificates.yaml
+oc -n cert-manager-poc wait --for=condition=Ready certificate/test-ecdsa --timeout=2m
+oc -n cert-manager-poc wait --for=condition=Ready certificate/test-rsa --timeout=2m
+oc -n cert-manager-poc get certificate
 ```
 
-This validates cert-manager ECDSA issuance. The IBU validation below is the
-separate test for recert's handling of cluster cryptographic material.
+Record the key types for post-upgrade comparison:
 
-## Configure the recert image for IBU
+```bash
+echo "=== ECDSA key type (expect: EC) ==="
+oc -n cert-manager-poc get secret test-ecdsa-tls \
+  -o jsonpath='{.data.tls\.key}' | base64 -d | openssl pkey -text -noout | grep 'EC\|Algorithm'
 
-`ImageBasedUpgrade` is cluster-scoped and LCA creates the singleton named
-`upgrade`. Set the recert override before entering the `Prep` stage:
+echo "=== RSA key type (expect: RSA) ==="
+oc -n cert-manager-poc get secret test-rsa-tls \
+  -o jsonpath='{.data.tls\.key}' | base64 -d | openssl pkey -text -noout | grep 'RSA\|Algorithm'
+```
+
+### Step 5: Configure the recert image
+
+Set the recert image override on the `ImageBasedUpgrade` object before entering
+`Prep`. LCA creates the singleton named `upgrade`.
 
 ```bash
 oc annotate imagebasedupgrade upgrade \
   lca.openshift.io/recert-image="$RECERT_IMAGE" --overwrite
-oc get imagebasedupgrade upgrade -o yaml
+oc get imagebasedupgrade upgrade \
+  -o jsonpath='{.metadata.annotations.lca\.openshift\.io/recert-image}{"\n"}'
 ```
 
-If the recert repository is private, also set the pull-secret annotation to a
-secret in `openshift-lifecycle-agent`:
+If the recert image is in a private repository, also set the pull-secret
+annotation pointing to a secret in `openshift-lifecycle-agent`:
 
 ```bash
 oc annotate imagebasedupgrade upgrade \
   lca.openshift.io/recert-pull-secret=bapalm-quay-pull --overwrite
 ```
 
-Confirm the annotation before starting an upgrade:
+### Step 6: Perform the image-based upgrade
 
-```bash
-oc get imagebasedupgrade upgrade \
-  -o jsonpath='{.metadata.annotations.lca\.openshift\.io/recert-image}{"\n"}'
-```
-
-Use the normal LCA seed-image and OADP prerequisites for the spoke. A minimal
-test CR looks like this; replace the seed image and version with the image
-prepared for the target OpenShift release:
+Replace `<seed-image>` and `<target-version>` with the values from your seed
+cluster.
 
 ```yaml
 apiVersion: lca.openshift.io/v1
@@ -404,128 +303,261 @@ metadata:
   annotations:
     lca.openshift.io/recert-image: quay.io/bapalm/recert:main-78abf4
 spec:
-  stage: Idle
+  stage: Prep
   seedImageRef:
-    version: 4.19.0
-    image: quay.io/example/seed-image:4.19.0
-  autoRollbackOnFailure: {}
+    version: "<target-version>"
+    image: "<seed-image>"
+  oadpContent:
+  - name: oadp-backup-restore-cm
+    namespace: openshift-adp
+  autoRollbackOnFailure:
+    initMonitorTimeoutSeconds: 1800
 ```
 
-Do not advance to `Prep` until the seed image, OADP content, pull secrets, and
-extra manifests are ready. Observe the complete lifecycle with:
+```bash
+oc apply -f ibu.yaml
+oc get imagebasedupgrade upgrade -w
+```
+
+Wait for `PrepCompleted` before continuing. Once Prep is done, advance to
+`Upgrade`:
 
 ```bash
+oc patch imagebasedupgrade upgrade --type merge -p '{"spec":{"stage":"Upgrade"}}'
+```
+
+**The cluster will reboot.** You will lose connectivity for approximately
+8–10 minutes while the node pivots to the new stateroot, recert runs, and
+cluster operators stabilize. Reconnect and verify:
+
+```bash
+oc get clusterversion
+oc get nodes
+oc get co | grep -v 'True.*False.*False'
 oc get imagebasedupgrade upgrade -o yaml
-oc get imagebasedupgrade upgrade \
-  -o jsonpath='{range .status.history[*]}{.stage}{"\t"}{.startTime}{"\t"}{.completionTime}{"\n"}{end}'
-oc -n openshift-lifecycle-agent logs deploy/lifecycle-agent-controller-manager \
-  -c manager --since=30m | tee lca-controller.log
 ```
 
-## ECDSA validation during IBU
+### Step 7: Verify certificates survived
 
-The recert change under test accepts both common PEM encodings for EC private
-keys and normalizes them to PKCS#8 internally. Create local fixtures to verify
-the two encodings used by the test procedure:
+Confirm both TLS secrets are present and contain the expected key types:
 
 ```bash
-openssl ecparam -name prime256v1 -genkey -noout -out ecdsa-sec1.key
-openssl pkcs8 -topk8 -nocrypt \
-  -in ecdsa-sec1.key -out ecdsa-pkcs8.key
-openssl pkey -in ecdsa-sec1.key -pubout -out ecdsa-public.pem
-openssl pkey -in ecdsa-pkcs8.key -pubout -out ecdsa-pkcs8-public.pem
+echo "=== Check ECDSA cert preserved ==="
+oc -n cert-manager-poc get secret test-ecdsa-tls
+oc -n cert-manager-poc get secret test-ecdsa-tls \
+  -o jsonpath='{.data.tls\.key}' | base64 -d | openssl pkey -text -noout | grep 'EC\|Algorithm'
+
+echo "=== Check RSA cert preserved ==="
+oc -n cert-manager-poc get secret test-rsa-tls
+oc -n cert-manager-poc get secret test-rsa-tls \
+  -o jsonpath='{.data.tls\.key}' | base64 -d | openssl pkey -text -noout | grep 'RSA\|Algorithm'
+
+echo "=== Certificate status ==="
+oc -n cert-manager-poc get certificate
 ```
 
-For an actual IBU test, the seed cluster must contain ECDSA-backed cluster
-cryptographic material that recert will process. The standalone cert-manager
-Secret above is useful for verifying certificate issuance, but it is not by
-itself proof that recert processed a cluster certificate. Record the source
-encoding, run the IBU through `Prep` and `Upgrade`, and verify the post-pivot
-certificate/key material and recert logs on the target:
+Check the LCA controller logs for recert processing:
 
 ```bash
-oc get imagebasedupgrade upgrade -o jsonpath='{.status.conditions}'
-oc get imagebasedupgrade upgrade -o jsonpath='{.status.history}'
 oc -n openshift-lifecycle-agent logs deploy/lifecycle-agent-controller-manager \
-  -c manager --since=2h | rg -i 'recert|ecdsa|pkcs|postpivot|rollback'
+  -c manager --since=2h | grep -i 'recert\|ecdsa\|pkcs\|postpivot'
 ```
 
-If the upgrade fails, preserve the IBU YAML, LCA controller log, machine and
-seed-generation logs, and the recert image tag before retrying or returning to
-`Idle`.
+A successful result shows both secrets intact with their original key types and
+no recert errors in the LCA logs.
 
-## Hub/spoke deployment with ACM
+---
 
-The direct spoke resources above can be delivered through ACM. The hub-side
-pattern is:
+## Scenario B: cert-manager on a consoleless cluster
 
-1. Put the `CatalogSource`, namespaces, `OperatorGroup`, `Subscription`, and
-   operator configuration resources into an ACM `Policy` or `PolicyGenerator`
-   input.
-2. Bind the policy to a `Placement` selecting the intended SNO spokes.
-3. Let ACM enforce the resources and verify the resulting CSVs on each spoke.
+This scenario confirms that cert-manager-operator installs and issues
+certificates correctly on a cluster without the OpenShift console
+(`console-operator` disabled or absent). No browser or console URL is needed.
 
-For a simple ACM policy, the spoke objects are placed inside a
-`ConfigurationPolicy` under `spec.policy-templates`, and the policy is bound
-to a Placement in the hub namespace:
+### Prerequisites
+
+- An OpenShift cluster (SNO or multi-node) with the console operator disabled
+  or removed. A standard SNO with
+  `oc patch consoles.operator.openshift.io cluster --type merge -p '{"spec":{"managementState":"Removed"}}'`
+  is sufficient.
+- `oc` logged in with cluster-admin privileges.
+
+```bash
+# Confirm console is not running
+oc get co console
+oc get deployment -n openshift-console 2>/dev/null || echo "no console deployment"
+```
+
+### Step 1: Install cert-manager-operator
+
+Follow Steps 1 and 3 from [Scenario A](#scenario-a-ecdsarsa-certificate-preservation-across-ibu)
+to apply the CatalogSource, Subscription, and `CertManager` CR.
+
+```bash
+oc apply -f catalogs-and-namespaces.yaml
+oc -n openshift-marketplace wait --for=condition=READY \
+  catalogsource/bapalm-cert-manager-poc --timeout=5m
+oc apply -f subscription-cert-manager.yaml
+oc apply -f cert-manager.yaml
+```
+
+### Step 2: Verify operator health on a consoleless cluster
+
+Confirm the CSV, deployments, and cert issuance work using only `oc`:
+
+```bash
+# CSV ready
+oc -n cert-manager-operator get csv -o wide
+
+# All three operand deployments healthy
+oc -n cert-manager get deploy,pods
+oc -n cert-manager rollout status deploy/cert-manager
+oc -n cert-manager rollout status deploy/cert-manager-webhook
+oc -n cert-manager rollout status deploy/cert-manager-cainjector
+
+# No degraded cluster operators related to cert-manager
+oc get co | grep cert
+```
+
+Issue a test certificate to confirm core functionality:
 
 ```yaml
-apiVersion: policy.open-cluster-management.io/v1
-kind: Policy
+apiVersion: v1
+kind: Namespace
 metadata:
-  name: cert-manager-lifecycle-agent-poc
-  namespace: open-cluster-management
+  name: cert-manager-poc
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: selfsigned
+  namespace: cert-manager-poc
 spec:
-  remediationAction: enforce
-  policy-templates:
-  - objectDefinition:
-      apiVersion: policy.open-cluster-management.io/v1
-      kind: ConfigurationPolicy
-      metadata:
-        name: cert-manager-lifecycle-agent-poc-resources
-      spec:
-        remediationAction: enforce
-        severity: medium
-        object-templates:
-        - complianceType: musthave
-          objectDefinition:
-            apiVersion: operators.coreos.com/v1alpha1
-            kind: CatalogSource
-            metadata:
-              name: bapalm-cert-manager-poc
-              namespace: openshift-marketplace
-            spec:
-              sourceType: grpc
-              image: quay.io/bapalm/cert-manager-operator-catalog:master-a5aacc
-        - complianceType: musthave
-          objectDefinition:
-            apiVersion: operators.coreos.com/v1alpha1
-            kind: CatalogSource
-            metadata:
-              name: bapalm-lifecycle-agent-poc
-              namespace: openshift-marketplace
-            spec:
-              sourceType: grpc
-              image: quay.io/bapalm/lifecycle-agent-operator-catalog:main-cb8304
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: consoleless-test
+  namespace: cert-manager-poc
+spec:
+  secretName: consoleless-test-tls
+  commonName: consoleless.example.com
+  dnsNames:
+  - consoleless.example.com
+  issuerRef:
+    name: selfsigned
+    kind: Issuer
+  privateKey:
+    algorithm: ECDSA
+    size: 256
 ```
-
-Add the namespace, OperatorGroup, Subscription, `CertManager`, and IBU
-objects to the same policy or to separate policies with the same Placement.
-Keep the catalog resources separate from operator configuration when possible;
-this makes catalog failures easier to distinguish from operator failures.
-
-On the hub, inspect policy compliance and managed-cluster placement:
 
 ```bash
-oc -n open-cluster-management get policy cert-manager-lifecycle-agent-poc -o yaml
-oc -n open-cluster-management get placement,placementbinding
-oc get managedcluster
+oc apply -f consoleless-test-cert.yaml
+oc -n cert-manager-poc wait --for=condition=Ready certificate/consoleless-test --timeout=2m
+oc -n cert-manager-poc get certificate consoleless-test -o wide
+oc -n cert-manager-poc get secret consoleless-test-tls \
+  -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -noout -subject -issuer
 ```
 
-Then use the spoke kubeconfig and run the direct verification commands from
-above. ACM compliance only proves that the manifests were delivered; the CSV,
-deployment, cert-manager, and IBU checks prove that the operators actually
-started and used the intended images.
+A `Ready=True` certificate and a valid x509 subject confirm that cert-manager
+operates correctly with no console present.
+
+---
+
+## Seed image creation
+
+The IBU seed image is a snapshot of a running SNO at the target OCP version.
+Create it on a dedicated seed cluster before running Scenario A.
+
+1. Create a pull-secret for the registry on the seed cluster:
+
+```bash
+export KUBECONFIG="$SEED_KUBECONFIG"
+oc create secret generic seedgen \
+  -n openshift-lifecycle-agent \
+  --from-file=.dockerconfigjson=<path-to-pull-secret> \
+  --type=kubernetes.io/dockerconfigjson
+```
+
+2. Apply the `SeedGenerator` CR:
+
+```yaml
+apiVersion: lca.openshift.io/v1
+kind: SeedGenerator
+metadata:
+  name: seedimage
+spec:
+  seedImage: quay.io/<your-repo>/ibu-seed:<target-version>
+```
+
+```bash
+oc apply -f seedgenerator.yaml
+oc get seedgenerator seedimage -w
+```
+
+The seed cluster reboots during image creation (~15–20 minutes). The node
+returns to normal operation after the image is pushed.
+
+---
+
+## Building custom images
+
+To build images from feature branches or pull requests, dispatch the workflow
+manually:
+
+```bash
+gh workflow run build-images.yml \
+  --repo sebrandon1/cert-manager-poc \
+  --ref main \
+  --field lifecycle_ref=main \
+  --field recert_ref=pull/1758/head \
+  --field cert_manager_ref=pull/424/head \
+  --field image_tag=auto
+```
+
+Use `pull/<number>/head` for fork PR code. Keep `image_tag=auto` so builds
+from different branches do not overwrite one another.
+
+Monitor progress and copy the image references from the completed workflow
+summary:
+
+```bash
+gh run list --repo sebrandon1/cert-manager-poc \
+  --workflow build-images.yml --limit 5
+gh run view RUN_ID --repo sebrandon1/cert-manager-poc --web
+```
+
+Update the `Current image set` variables above with the tags from the summary
+before running either scenario.
+
+---
+
+## Optional: private Quay pull credentials
+
+If the POC repositories are private, create a registry secret and link it to
+the operator service accounts:
+
+```bash
+oc -n cert-manager-operator create secret docker-registry bapalm-quay-pull \
+  --docker-server=quay.io \
+  --docker-username="$QUAY_USERNAME" \
+  --docker-password="$QUAY_TOKEN"
+oc -n cert-manager-operator secrets link cert-manager-operator-controller-manager \
+  bapalm-quay-pull --for=pull
+
+oc -n openshift-lifecycle-agent create secret docker-registry bapalm-quay-pull \
+  --docker-server=quay.io \
+  --docker-username="$QUAY_USERNAME" \
+  --docker-password="$QUAY_TOKEN"
+oc -n openshift-lifecycle-agent secrets link lifecycle-agent-controller-manager \
+  bapalm-quay-pull --for=pull
+```
+
+Do not commit registry credentials to this repository.
+
+---
 
 ## Troubleshooting
 
@@ -549,12 +581,13 @@ oc -n openshift-lifecycle-agent logs deploy/lifecycle-agent-controller-manager \
   -c manager --since=30m
 
 # Image resolution
-oc -n cert-manager-operator get deploy -o yaml | rg 'image:'
-oc -n openshift-lifecycle-agent get deploy -o yaml | rg 'image:'
-```
+oc -n cert-manager-operator get deploy -o yaml | grep 'image:'
+oc -n openshift-lifecycle-agent get deploy -o yaml | grep 'image:'
 
-To rebuild manually, dispatch the workflow with the desired source refs. Use
-`auto` for the readable per-repository tags, then update the variables and
-manifests in this README from the completed workflow summary. Scheduled runs
-always use the upstream `main` branches for lifecycle-agent and recert and the
-upstream `master` branch for cert-manager-operator.
+# IBU status
+oc get imagebasedupgrade upgrade -o yaml
+oc get imagebasedupgrade upgrade \
+  -o jsonpath='{range .status.history[*]}{.stage}{"\t"}{.startTime}{"\t"}{.completionTime}{"\n"}{end}'
+oc -n openshift-lifecycle-agent logs deploy/lifecycle-agent-controller-manager \
+  -c manager --since=2h | grep -i 'recert\|ecdsa\|pkcs\|rollback'
+```
