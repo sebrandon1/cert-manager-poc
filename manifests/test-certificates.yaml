@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cert-manager-poc
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: selfsigned
+  namespace: cert-manager-poc
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: test-ecdsa
+  namespace: cert-manager-poc
+spec:
+  secretName: test-ecdsa-tls
+  commonName: test-ecdsa.example.com
+  dnsNames:
+  - test-ecdsa.example.com
+  issuerRef:
+    name: selfsigned
+    kind: Issuer
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: test-rsa
+  namespace: cert-manager-poc
+spec:
+  secretName: test-rsa-tls
+  commonName: test-rsa.example.com
+  dnsNames:
+  - test-rsa.example.com
+  issuerRef:
+    name: selfsigned
+    kind: Issuer
+  privateKey:
+    algorithm: RSA
+    size: 2048

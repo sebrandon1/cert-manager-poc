@@ -59,9 +59,11 @@ oc version
 
 ### Step 1: Set up CatalogSources and namespaces
 
-Apply the catalog sources, namespaces, and operator groups in a single manifest:
+Set the env vars from the [Current image set](#current-image-set) section above,
+then apply the catalog sources, namespaces, and operator groups:
 
-```yaml
+```bash
+cat <<EOF | oc apply -f -
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -95,7 +97,7 @@ metadata:
   namespace: openshift-marketplace
 spec:
   sourceType: grpc
-  image: quay.io/bapalm/cert-manager-operator-catalog:master-a5aacc
+  image: ${CERT_MANAGER_CATALOG_IMAGE}
   displayName: bapalm cert-manager POC
   publisher: bapalm
   updateStrategy:
@@ -109,16 +111,16 @@ metadata:
   namespace: openshift-marketplace
 spec:
   sourceType: grpc
-  image: quay.io/bapalm/lifecycle-agent-operator-catalog:main-cb8304
+  image: ${LCA_CATALOG_IMAGE}
   displayName: bapalm lifecycle-agent POC
   publisher: bapalm
   updateStrategy:
     registryPoll:
       interval: 10m
+EOF
 ```
 
 ```bash
-oc apply -f catalogs-and-namespaces.yaml
 oc -n openshift-marketplace wait --for=condition=READY \
   catalogsource/bapalm-cert-manager-poc --timeout=5m
 oc -n openshift-marketplace wait --for=condition=READY \
@@ -129,22 +131,8 @@ oc -n openshift-marketplace get packagemanifest \
 
 ### Step 2: Install lifecycle-agent operator
 
-```yaml
-apiVersion: operators.coreos.com/v1alpha1
-kind: Subscription
-metadata:
-  name: lifecycle-agent
-  namespace: openshift-lifecycle-agent
-spec:
-  channel: alpha
-  name: lifecycle-agent
-  source: bapalm-lifecycle-agent-poc
-  sourceNamespace: openshift-marketplace
-  installPlanApproval: Automatic
-```
-
 ```bash
-oc apply -f subscription-lca.yaml
+oc apply -f https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/subscription-lca.yaml
 oc -n openshift-lifecycle-agent get subscription,installplan,csv
 oc -n openshift-lifecycle-agent rollout status deploy/lifecycle-agent-controller-manager
 ```
@@ -158,40 +146,16 @@ oc -n openshift-lifecycle-agent get deploy lifecycle-agent-controller-manager \
 
 ### Step 3: Install cert-manager-operator
 
-```yaml
-apiVersion: operators.coreos.com/v1alpha1
-kind: Subscription
-metadata:
-  name: cert-manager-operator
-  namespace: cert-manager-operator
-spec:
-  channel: stable-v1
-  name: cert-manager-operator
-  source: bapalm-cert-manager-poc
-  sourceNamespace: openshift-marketplace
-  installPlanApproval: Automatic
-```
-
 ```bash
-oc apply -f subscription-cert-manager.yaml
+oc apply -f https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/subscription-cert-manager.yaml
 oc -n cert-manager-operator get subscription,installplan,csv
 oc -n cert-manager-operator rollout status deploy/cert-manager-operator-controller-manager
 ```
 
 Create the singleton `CertManager` resource:
 
-```yaml
-apiVersion: operator.openshift.io/v1alpha1
-kind: CertManager
-metadata:
-  name: cluster
-spec:
-  managementState: Managed
-  logLevel: Normal
-```
-
 ```bash
-oc apply -f cert-manager.yaml
+oc apply -f https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/cert-manager-cr.yaml
 oc -n cert-manager get deploy,pods
 oc -n cert-manager rollout status deploy/cert-manager
 oc -n cert-manager rollout status deploy/cert-manager-webhook
@@ -202,57 +166,8 @@ oc -n cert-manager rollout status deploy/cert-manager-cainjector
 
 Create a self-signed issuer and one certificate of each key type:
 
-```yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: cert-manager-poc
----
-apiVersion: cert-manager.io/v1
-kind: Issuer
-metadata:
-  name: selfsigned
-  namespace: cert-manager-poc
-spec:
-  selfSigned: {}
----
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: test-ecdsa
-  namespace: cert-manager-poc
-spec:
-  secretName: test-ecdsa-tls
-  commonName: test-ecdsa.example.com
-  dnsNames:
-  - test-ecdsa.example.com
-  issuerRef:
-    name: selfsigned
-    kind: Issuer
-  privateKey:
-    algorithm: ECDSA
-    size: 256
----
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: test-rsa
-  namespace: cert-manager-poc
-spec:
-  secretName: test-rsa-tls
-  commonName: test-rsa.example.com
-  dnsNames:
-  - test-rsa.example.com
-  issuerRef:
-    name: selfsigned
-    kind: Issuer
-  privateKey:
-    algorithm: RSA
-    size: 2048
-```
-
 ```bash
-oc apply -f test-certificates.yaml
+oc apply -f https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/test-certificates.yaml
 oc -n cert-manager-poc wait --for=condition=Ready certificate/test-ecdsa --timeout=2m
 oc -n cert-manager-poc wait --for=condition=Ready certificate/test-rsa --timeout=2m
 oc -n cert-manager-poc get certificate
@@ -292,30 +207,36 @@ oc annotate imagebasedupgrade upgrade \
 
 ### Step 6: Perform the image-based upgrade
 
-Replace `<seed-image>` and `<target-version>` with the values from your seed
-cluster.
+Set `SEED_IMAGE` and `TARGET_VERSION` for your seed cluster, then apply the
+`ImageBasedUpgrade` CR:
 
-```yaml
+```bash
+export SEED_IMAGE="quay.io/<your-repo>/ibu-seed:<target-version>"
+export TARGET_VERSION="4.19.x"
+```
+
+```bash
+cat <<EOF | oc apply -f -
 apiVersion: lca.openshift.io/v1
 kind: ImageBasedUpgrade
 metadata:
   name: upgrade
   annotations:
-    lca.openshift.io/recert-image: quay.io/bapalm/recert:main-78abf4
+    lca.openshift.io/recert-image: ${RECERT_IMAGE}
 spec:
   stage: Prep
   seedImageRef:
-    version: "<target-version>"
-    image: "<seed-image>"
+    version: "${TARGET_VERSION}"
+    image: "${SEED_IMAGE}"
   oadpContent:
   - name: oadp-backup-restore-cm
     namespace: openshift-adp
   autoRollbackOnFailure:
     initMonitorTimeoutSeconds: 1800
+EOF
 ```
 
 ```bash
-oc apply -f ibu.yaml
 oc get imagebasedupgrade upgrade -w
 ```
 
@@ -390,16 +311,9 @@ oc get deployment -n openshift-console 2>/dev/null || echo "no console deploymen
 
 ### Step 1: Install cert-manager-operator
 
-Follow Steps 1 and 3 from [Scenario A](#scenario-a-ecdsarsa-certificate-preservation-across-ibu)
-to apply the CatalogSource, Subscription, and `CertManager` CR.
-
-```bash
-oc apply -f catalogs-and-namespaces.yaml
-oc -n openshift-marketplace wait --for=condition=READY \
-  catalogsource/bapalm-cert-manager-poc --timeout=5m
-oc apply -f subscription-cert-manager.yaml
-oc apply -f cert-manager.yaml
-```
+Set the env vars from the [Current image set](#current-image-set) section, then
+follow Step 1 and Step 3 from Scenario A to apply the CatalogSource, Subscription,
+and `CertManager` CR.
 
 ### Step 2: Verify operator health on a consoleless cluster
 
@@ -421,40 +335,8 @@ oc get co | grep cert
 
 Issue a test certificate to confirm core functionality:
 
-```yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: cert-manager-poc
----
-apiVersion: cert-manager.io/v1
-kind: Issuer
-metadata:
-  name: selfsigned
-  namespace: cert-manager-poc
-spec:
-  selfSigned: {}
----
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: consoleless-test
-  namespace: cert-manager-poc
-spec:
-  secretName: consoleless-test-tls
-  commonName: consoleless.example.com
-  dnsNames:
-  - consoleless.example.com
-  issuerRef:
-    name: selfsigned
-    kind: Issuer
-  privateKey:
-    algorithm: ECDSA
-    size: 256
-```
-
 ```bash
-oc apply -f consoleless-test-cert.yaml
+oc apply -f https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/consoleless-test-cert.yaml
 oc -n cert-manager-poc wait --for=condition=Ready certificate/consoleless-test --timeout=2m
 oc -n cert-manager-poc get certificate consoleless-test -o wide
 oc -n cert-manager-poc get secret consoleless-test-tls \
@@ -481,19 +363,10 @@ oc create secret generic seedgen \
   --type=kubernetes.io/dockerconfigjson
 ```
 
-2. Apply the `SeedGenerator` CR:
-
-```yaml
-apiVersion: lca.openshift.io/v1
-kind: SeedGenerator
-metadata:
-  name: seedimage
-spec:
-  seedImage: quay.io/<your-repo>/ibu-seed:<target-version>
-```
+2. Edit `manifests/seedgenerator.yaml` with your registry and target version, then apply:
 
 ```bash
-oc apply -f seedgenerator.yaml
+oc apply -f https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/seedgenerator.yaml
 oc get seedgenerator seedimage -w
 ```
 

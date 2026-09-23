@@ -1,0 +1,11 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: lifecycle-agent
+  namespace: openshift-lifecycle-agent
+spec:
+  channel: alpha
+  name: lifecycle-agent
+  source: bapalm-lifecycle-agent-poc
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic
