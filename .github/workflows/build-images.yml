@@ -190,6 +190,12 @@ jobs:
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_TOKEN }}
 
+      - name: Pin cargo-chef dependencies for the POC build
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/cargo install cargo-chef --version 0.1.75$/cargo install cargo-chef --version 0.1.75 --locked/' recert/Dockerfile
+
       - name: Build and publish recert architecture image
         uses: docker/build-push-action@v7
         with:
