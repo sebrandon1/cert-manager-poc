@@ -59,7 +59,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: ${{ env.LIFECYCLE_REPOSITORY }}
-          ref: ${{ inputs.lifecycle_ref || 'main' }}
+          ref: ${{ startsWith(inputs.lifecycle_ref, 'pull/') && format('refs/{0}', inputs.lifecycle_ref) || inputs.lifecycle_ref || 'main' }}
           path: lifecycle-agent
           fetch-depth: 1
 
@@ -67,7 +67,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: ${{ env.RECERT_REPOSITORY }}
-          ref: ${{ inputs.recert_ref || 'main' }}
+          ref: ${{ startsWith(inputs.recert_ref, 'pull/') && format('refs/{0}', inputs.recert_ref) || inputs.recert_ref || 'main' }}
           path: recert
           fetch-depth: 1
 
@@ -75,7 +75,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: ${{ env.CERT_MANAGER_REPOSITORY }}
-          ref: ${{ inputs.cert_manager_ref || 'master' }}
+          ref: ${{ startsWith(inputs.cert_manager_ref, 'pull/') && format('refs/{0}', inputs.cert_manager_ref) || inputs.cert_manager_ref || 'master' }}
           path: cert-manager-operator
           fetch-depth: 1
 
