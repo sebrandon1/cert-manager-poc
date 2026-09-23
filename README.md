@@ -63,61 +63,8 @@ Set the env vars from the [Current image set](#current-image-set) section above,
 then apply the catalog sources, namespaces, and operator groups:
 
 ```bash
-cat <<EOF | oc apply -f -
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: cert-manager-operator
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: openshift-lifecycle-agent
-  annotations:
-    workload.openshift.io/allowed: management
----
-apiVersion: operators.coreos.com/v1
-kind: OperatorGroup
-metadata:
-  name: cert-manager-operator
-  namespace: cert-manager-operator
-spec: {}
----
-apiVersion: operators.coreos.com/v1
-kind: OperatorGroup
-metadata:
-  name: lifecycle-agent
-  namespace: openshift-lifecycle-agent
-spec: {}
----
-apiVersion: operators.coreos.com/v1alpha1
-kind: CatalogSource
-metadata:
-  name: bapalm-cert-manager-poc
-  namespace: openshift-marketplace
-spec:
-  sourceType: grpc
-  image: ${CERT_MANAGER_CATALOG_IMAGE}
-  displayName: bapalm cert-manager POC
-  publisher: bapalm
-  updateStrategy:
-    registryPoll:
-      interval: 10m
----
-apiVersion: operators.coreos.com/v1alpha1
-kind: CatalogSource
-metadata:
-  name: bapalm-lifecycle-agent-poc
-  namespace: openshift-marketplace
-spec:
-  sourceType: grpc
-  image: ${LCA_CATALOG_IMAGE}
-  displayName: bapalm lifecycle-agent POC
-  publisher: bapalm
-  updateStrategy:
-    registryPoll:
-      interval: 10m
-EOF
+curl -sL https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/catalogs-and-namespaces.yaml \
+  | envsubst | oc apply -f -
 ```
 
 ```bash
