@@ -29,9 +29,114 @@ export CERT_MANAGER_BUNDLE_IMAGE=quay.io/bapalm/cert-manager-operator-bundle:mas
 export CERT_MANAGER_CATALOG_IMAGE=quay.io/bapalm/cert-manager-operator-catalog:master-a5aacc
 ```
 
-The tag format is `<source-ref>-<first-six-characters-of-source-SHA>`. When a
-new build completes, copy the image references from its workflow summary and
-replace the variables above.
+The tag format is `<source-ref>-<first-six-characters-of-source-SHA>`. Pull
+request refs use `pr-<number>` (or `pr-<number>-merge`) as the source label.
+When a new build completes, copy the image references from its workflow summary
+and replace the variables above.
+
+## Test feature branches and pull requests
+
+The workflow accepts an independent source ref for each upstream repository.
+Use a normal branch name when the branch exists in the upstream repository. For
+pull requests from forks, use the pull-request ref from the upstream repository:
+
+- `pull/<number>/head` builds the contributor's PR head commit.
+- `pull/<number>/merge` builds GitHub's synthetic PR merge commit.
+
+The default for feature validation is `head`, because it tests the feature code
+without adding unrelated changes from the base branch. The current PRs of
+interest are:
+
+| Component | PR | Test ref |
+| --- | --- | --- |
+| cert-manager-operator | [#424](https://github.com/openshift/cert-manager-operator/pull/424) | `pull/424/head` |
+| recert | [#1758](https://github.com/rh-ecosystem-edge/recert/pull/1758) | `pull/1758/head` |
+
+### Dispatch a feature build
+
+From the repository root, dispatch the workflow with the desired ref for each
+component. This example builds both feature PRs while keeping lifecycle-agent
+on upstream `main`:
+
+```bash
+gh workflow run build-images.yml \
+  --repo sebrandon1/cert-manager-poc \
+  --ref main \
+  --field lifecycle_ref=main \
+  --field recert_ref=pull/1758/head \
+  --field cert_manager_ref=pull/424/head \
+  --field image_tag=auto
+```
+
+The same inputs are available under **Actions → Build and publish POC images →
+Run workflow**. Leave `image_tag` set to `auto`; it keeps builds from different
+branches from overwriting one another.
+
+Monitor the run and open its summary when it completes:
+
+```bash
+gh run list --repo sebrandon1/cert-manager-poc \
+  --workflow build-images.yml --limit 1
+gh run view RUN_ID --repo sebrandon1/cert-manager-poc --web
+```
+
+For automatic tags, PR refs become readable tags such as
+`pr-424-<sha>` and `pr-1758-<sha>`, while the unchanged lifecycle-agent build
+uses `main-<sha>`. The six-character SHA is resolved from the exact commit that
+was checked out. Always use the final image references from the workflow
+summary, not a guessed SHA.
+
+### Install the feature images on a spoke
+
+For a disposable spoke, copy the image variables from the workflow summary and
+then use the installation manifests in this README. Set the catalog images to
+the feature-build catalog tags before applying them:
+
+```bash
+export CERT_MANAGER_CATALOG_IMAGE=quay.io/bapalm/cert-manager-operator-catalog:pr-424-<sha>
+export LIFECYCLE_CATALOG_IMAGE=quay.io/bapalm/lifecycle-agent-operator-catalog:main-<sha>
+export RECERT_IMAGE=quay.io/bapalm/recert:pr-1758-<sha>
+```
+
+In `catalogs-and-namespaces.yaml`, replace the two CatalogSource image values
+with `CERT_MANAGER_CATALOG_IMAGE` and `LIFECYCLE_CATALOG_IMAGE`, then apply and
+wait for both CatalogSources to become ready as described below. Confirm that
+the feature packages are visible before creating the Subscriptions:
+
+```bash
+oc -n openshift-marketplace get catalogsource
+oc -n openshift-marketplace get packagemanifest \
+  cert-manager-operator lifecycle-agent
+```
+
+After the operators install, verify that the CSVs and deployments are healthy
+and that the resolved images match the feature tags. Configure recert on the
+IBU object with the feature image:
+
+```bash
+oc annotate imagebasedupgrade upgrade \
+  lca.openshift.io/recert-image="$RECERT_IMAGE" --overwrite
+oc get imagebasedupgrade upgrade \
+  -o jsonpath='{.metadata.annotations.lca\.openshift\.io/recert-image}{"\n"}'
+```
+
+The complete ECDSA and IBU verification procedures remain in the sections
+below. Record the workflow run URL, source SHAs, image tags, CSV versions, and
+IBU status with the test results.
+
+When reusing a spoke, remember that a feature build may retain the same CSV
+version as the default build. A fresh disposable spoke is preferred; otherwise
+uninstall the previous test installation according to your cluster's normal
+procedure before switching CatalogSources.
+
+### Deploy feature catalogs through ACM
+
+For hub/spoke testing, update the two CatalogSource image values in the ACM
+policy or PolicyGenerator input to the feature catalog tags, apply the policy
+on the hub, and wait for compliance on the selected spokes. Keep the recert
+image override in the spoke-facing IBU resource or policy. Catalog delivery and
+operator health must be verified on the spoke; hub policy compliance alone does
+not prove that OLM installed the feature bundles.
 
 ## Prerequisites
 

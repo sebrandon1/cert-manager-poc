@@ -90,7 +90,19 @@ jobs:
           cert_manager_sha="$(git -C cert-manager-operator rev-parse HEAD)"
 
           ref_label() {
-            local ref="${1##*/}"
+            local source_ref="${1#refs/}"
+
+            if [[ "$source_ref" =~ ^pull/([0-9]+)/head$ ]]; then
+              printf 'pr-%s' "${BASH_REMATCH[1]}"
+              return
+            fi
+
+            if [[ "$source_ref" =~ ^pull/([0-9]+)/merge$ ]]; then
+              printf 'pr-%s-merge' "${BASH_REMATCH[1]}"
+              return
+            fi
+
+            local ref="${source_ref##*/}"
             if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
               ref=sha
             fi
