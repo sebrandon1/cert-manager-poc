@@ -3,9 +3,9 @@
 This repository builds and publishes test images from the current upstream
 branches of:
 
-- `openshift/cert-manager-operator` (`master`)
-- `openshift-kni/lifecycle-agent` (`main`)
-- `rh-ecosystem-edge/recert` (`main`)
+- [`openshift/cert-manager-operator`](https://github.com/openshift/cert-manager-operator) (`master`)
+- [`openshift-kni/lifecycle-agent`](https://github.com/openshift-kni/lifecycle-agent) (`main`)
+- [`rh-ecosystem-edge/recert`](https://github.com/rh-ecosystem-edge/recert) (`main`)
 
 The workflow runs nightly at 06:00 UTC and can also be manually dispatched from
 [Actions](../../actions). It resolves the source commits, builds `linux/amd64`
@@ -17,7 +17,14 @@ production release artifacts.
 
 ## Current image set
 
-The current build uses these readable tags:
+The current build uses these readable tags from the [recert](https://quay.io/repository/bapalm/recert),
+[Lifecycle Agent operator](https://quay.io/repository/bapalm/lifecycle-agent-operator),
+[Lifecycle Agent bundle](https://quay.io/repository/bapalm/lifecycle-agent-operator-bundle),
+[Lifecycle Agent catalog](https://quay.io/repository/bapalm/lifecycle-agent-operator-catalog),
+[cert-manager operator](https://quay.io/repository/bapalm/cert-manager-operator),
+[cert-manager bundle](https://quay.io/repository/bapalm/cert-manager-operator-bundle),
+and [cert-manager catalog](https://quay.io/repository/bapalm/cert-manager-operator-catalog)
+repositories:
 
 ```bash
 export RECERT_IMAGE=quay.io/bapalm/recert:main-d00524
@@ -35,99 +42,26 @@ replace the variables above.
 
 ---
 
-## Prepare a ZTP hub and spoke
+## Optional: provision a ZTP hub and SNO spoke
 
-Use [succulent-cli](https://github.com/sebrandon1/succulent-cli) to inspect the
-plan, submit a ZTP hub-and-spoke provisioning request, and retrieve each
-cluster's kubeconfig. Install the CLI using its
-[installation guide](https://github.com/sebrandon1/succulent-cli/blob/main/docs/installation.md),
-then set the plan name and exact hub and spoke build tags:
-
-```bash
-succulent-cli version
-export ZTP_ENV="my-ztp-plan"
-export HUB_TAG="copy-exact-hub-build-tag"
-export SPOKE_TAG="copy-exact-spoke-build-tag"
-export ZTP_OWNER="your-username"
-export ZTP_EMAIL="you@example.com"
-
-succulent-cli get info --env "$ZTP_ENV"
-```
-
-Review the plan and hardware assignment before requesting a rebuild. Preview
-the request first; the CLI requires `--confirm` for this preview as well, while
-`--dry-run` prevents submission:
-
-```bash
-succulent-cli ztp provision --env "$ZTP_ENV" \
-  --owner "$ZTP_OWNER" --email "$ZTP_EMAIL" \
-  --sno-full-tag "$HUB_TAG" --spoke-full-tag "$SPOKE_TAG" \
-  --type sno --confirm --dry-run
-```
-
-After checking the environment, release tags, and SNO type, submit it by
-removing `--dry-run`:
-
-```bash
-succulent-cli ztp provision --env "$ZTP_ENV" \
-  --owner "$ZTP_OWNER" --email "$ZTP_EMAIL" \
-  --sno-full-tag "$HUB_TAG" --spoke-full-tag "$SPOKE_TAG" \
-  --type sno --confirm
-```
-
-Monitor the environment while Succulent and the ZTP GitOps pipeline provision
-the clusters:
-
-```bash
-succulent-cli get log --env "$ZTP_ENV" | tail -n 30
-succulent-cli watch --env "$ZTP_ENV"
-```
-
-If the spoke needs an installation-time GitOps change before deployment, the
-CLI supports `--stop-before-deployment` so the request can pause for that work.
-Apply the environment's GitOps changes and resume its deployment through the
-documented plan workflow before continuing. For example, the IBU container
-partition must be configured as part of cluster installation; see the
-[IBU prerequisites](#scenario-a-ecdsa-and-rsa-certificate-preservation-across-ibu).
-
-Retrieve and check both credentials separately. The `management` choice is the
-hub; `spoke` is the target SNO:
-
-```bash
-succulent-cli ztp kubeconfig --env "$ZTP_ENV" --choice management
-succulent-cli ztp kubeconfig --env "$ZTP_ENV" --choice spoke
-
-export HUB_KUBECONFIG="$HOME/Downloads/succulent/$ZTP_ENV/ztp-management-kubeconfig"
-export SPOKE_KUBECONFIG="$HOME/Downloads/succulent/$ZTP_ENV/ztp-spoke-kubeconfig"
-
-oc --kubeconfig "$HUB_KUBECONFIG" whoami
-oc --kubeconfig "$HUB_KUBECONFIG" get nodes
-oc --kubeconfig "$HUB_KUBECONFIG" get managedclusters
-oc --kubeconfig "$SPOKE_KUBECONFIG" whoami
-oc --kubeconfig "$SPOKE_KUBECONFIG" get clusterversion
-oc --kubeconfig "$SPOKE_KUBECONFIG" get nodes
-```
-
-Proceed when both kubeconfigs authenticate, the spoke is Ready from the hub,
-and the spoke version and node match the intended test target. Check the hub's
-managed-cluster conditions for `Available=True`. If kubeconfig
-retrieval returns an invalid file or `oc whoami` fails, fix access before
-continuing. Use the spoke kubeconfig for Scenario A:
-
-```bash
-export KUBECONFIG="$SPOKE_KUBECONFIG"
-```
+If you already have a target SNO, skip provisioning and continue to
+[Scenario A](#scenario-a-ecdsa-and-rsa-certificate-preservation-across-ibu).
+If you want a dedicated ZTP hub and spoke for testing, follow the
+[optional Succulent CLI provisioning guide](docs/ztp-hub-spoke-setup.md).
 
 ---
 
 ## Scenario A: ECDSA and RSA certificate preservation across IBU
 
-This scenario validates that cert-manager-issued ECDSA and RSA certificates
-survive an image-based upgrade. It exercises both
+This scenario validates that [cert-manager](https://cert-manager.io/docs/)-issued
+[Certificate resources](https://cert-manager.io/docs/usage/certificate/) for
+ECDSA and RSA survive an image-based upgrade. It exercises both
 [cert-manager-operator PR #424](https://github.com/openshift/cert-manager-operator/pull/424)
 (consoleless support) and
 [recert PR #1758](https://github.com/rh-ecosystem-edge/recert/pull/1758)
 (ECDSA PKCS#8 handling during post-pivot recert).
+For background on the failure mode and the original end-to-end validation, see
+the [cert-manager certificate preservation investigation](https://gist.github.com/sebrandon1/9c93733b4a0b2ea8dec0784b0c253209).
 
 ### Prerequisites
 
@@ -136,24 +70,32 @@ survive an image-based upgrade. It exercises both
   OCP 4.20.2 to 4.22.3.
 - A compatible seed image at the target version (see
   [Seed image creation](#seed-image-creation)). The seed cluster must match the
-  target's relevant hardware and configuration.
+  target's [hardware and configuration requirements](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/edge_computing/image-based-upgrade-for-single-node-openshift-clusters#seed-image-guidelines).
 - A dedicated `/var/lib/containers` partition on both seed and target, created
-  during installation, with the `varlibcontainers` partition label on both.
-- OADP / Velero, a configured `DataProtectionApplication`, an accessible
-  S3-compatible backup bucket, and backup and restore resources on the target
+  at install time with the `varlibcontainers` partition label, as described in
+  the [IBU partition requirements](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/edge_computing/image-based-upgrade-for-single-node-openshift-clusters#configuring-a-shared-container-partition-for-the-image-based-upgrade).
+- [OADP / Velero](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html-single/backup_and_restore/index#oadp-application-backup-and-restore), a configured `DataProtectionApplication`, an accessible
+  [S3-compatible backup bucket](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/backup_and_restore/oadp-application-backup-and-restore#configuring-oadp-with-aws-s3-compatible-storage), and backup and restore resources on the target
   spoke.
-- A Lifecycle Agent version compatible with the one used to generate the seed.
+- A Lifecycle Agent version compatible with the one used to generate the seed;
+  see the [minimum component versions](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/edge_computing/image-based-upgrade-for-single-node-openshift-clusters#minimum-software-version-of-components).
 - If RHACM manages the target, the hub must be at least as new as the IBU
-  target release.
+  target release, as described in the [hub cluster guidelines](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/edge_computing/image-based-upgrade-for-single-node-openshift-clusters#hub-cluster-guidelines).
 - `oc` logged in with cluster-admin privileges.
 
 Read the [OpenShift IBU preparation and upgrade guide](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/edge_computing/image-based-upgrade-for-single-node-openshift-clusters)
-for the complete version-specific requirements. In particular, the shared
+for the complete version-specific requirements, including the
+[seed image guidelines](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/edge_computing/image-based-upgrade-for-single-node-openshift-clusters#seed-image-guidelines)
+and [OADP backup and restore requirements](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/edge_computing/image-based-upgrade-for-single-node-openshift-clusters#oadp-backup-and-restore-guidelines). In particular, the shared
 container partition must be present when the seed and target clusters are
 installed; adding it after provisioning does not satisfy this prerequisite.
 
+Set `KUBECONFIG` to the target SNO's cluster-admin kubeconfig before running
+these commands. If you followed the optional ZTP setup guide, use
+`export KUBECONFIG="$SPOKE_KUBECONFIG"`; otherwise, point it at your existing
+SNO kubeconfig.
+
 ```bash
-export KUBECONFIG="$SPOKE_KUBECONFIG"
 oc whoami
 oc version
 ```
@@ -161,7 +103,7 @@ oc version
 ### Step 1: Set up CatalogSources and namespaces
 
 Set the env vars from the [Current image set](#current-image-set) section above,
-then apply the catalog sources, namespaces, and operator groups:
+then apply the [catalog sources, namespaces, and operator groups manifest](manifests/catalogs-and-namespaces.yaml):
 
 ```bash
 curl -sL https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/catalogs-and-namespaces.yaml \
@@ -179,6 +121,9 @@ oc -n openshift-marketplace get packagemanifest \
 
 ### Step 2: Install lifecycle-agent operator
 
+The [Lifecycle Agent subscription manifest](manifests/subscription-lca.yaml)
+installs the operator:
+
 ```bash
 oc apply -f https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/subscription-lca.yaml
 oc -n openshift-lifecycle-agent get subscription,installplan,csv
@@ -193,6 +138,9 @@ oc -n openshift-lifecycle-agent get deploy lifecycle-agent-controller-manager \
 ```
 
 ### Step 3: Install cert-manager-operator
+
+Apply the [cert-manager subscription](manifests/subscription-cert-manager.yaml)
+and [operator configuration](manifests/cert-manager-cr.yaml):
 
 ```bash
 oc apply -f https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/subscription-cert-manager.yaml
@@ -212,8 +160,9 @@ oc -n cert-manager rollout status deploy/cert-manager-cainjector
 
 ### Step 4: Create test certificates (ECDSA and RSA)
 
-Create self-signed ECDSA P-256, ECDSA P-384, and RSA-2048 certificates. These
-cover the key formats exercised in the successful full-upgrade validation:
+Use the [ECDSA and RSA test certificate manifest](manifests/test-certificates.yaml)
+to create self-signed ECDSA P-256, ECDSA P-384, and RSA-2048 certificates.
+These cover the key formats exercised in the successful full-upgrade validation:
 
 ```bash
 oc apply -f https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/test-certificates.yaml
@@ -256,6 +205,8 @@ oc annotate imagebasedupgrade upgrade \
 ```
 
 ### Step 6: Perform the image-based upgrade
+
+Follow the [Lifecycle Agent image-based upgrade procedure](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/edge_computing/image-based-upgrade-for-single-node-openshift-clusters#performing-an-image-based-upgrade-for-single-node-openshift-clusters-with-the-lifecycle-agent).
 
 Set `SEED_IMAGE` and `TARGET_VERSION` for your seed cluster, then apply the
 `ImageBasedUpgrade` CR:
@@ -394,7 +345,8 @@ oc -n cert-manager rollout status deploy/cert-manager-cainjector
 oc get co | grep cert
 ```
 
-Issue a test certificate to confirm core functionality:
+Issue a test certificate using the [consoleless test manifest](manifests/consoleless-test-cert.yaml)
+to confirm core functionality:
 
 ```bash
 oc apply -f https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/consoleless-test-cert.yaml
@@ -404,32 +356,36 @@ oc -n cert-manager-poc get secret consoleless-test-tls \
   -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -noout -subject -issuer
 ```
 
-A `Ready=True` certificate and a valid x509 subject confirm that cert-manager
-operates correctly with no console present.
+A `Ready=True` [Certificate](https://cert-manager.io/docs/usage/certificate/)
+and a valid x509 subject confirm that cert-manager operates correctly with no
+console present. See [cert-manager-operator PR #424](https://github.com/openshift/cert-manager-operator/pull/424)
+for the consoleless support under test.
 
 ---
 
 ## Seed image creation
 
 The IBU seed image is a snapshot of a running SNO at the target OCP version.
-Create it on a dedicated seed cluster before running Scenario A. Do not use the
-RHACM hub as a seed: the seed cluster must not have RHACM or multicluster engine
-installed. The seed's hardware, CPU topology, machine configuration, network
-family, FIPS setting, registry configuration, and day-2 operators must match
-the target as required by the IBU documentation. The seed must also have the
-`varlibcontainers` partition configured during installation.
+Create it on a dedicated seed cluster before running Scenario A. The seed
+cluster must not have RHACM or multicluster engine installed, and it must meet
+the official [image-based installation seed requirements](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/edge_computing/image-based-installation-for-single-node-openshift).
+Its hardware, CPU topology, machine configuration, network family, FIPS
+setting, registry configuration, and day-2 operators must match the target as
+required by the [IBU seed image guidelines](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/edge_computing/image-based-upgrade-for-single-node-openshift-clusters#seed-image-guidelines).
+The seed must also have the `varlibcontainers` partition configured during
+installation.
 
 Before generating the image, detach the seed from ZTP / RHACM and verify the
-seed-cluster requirements in the official IBU guide. In particular, the seed
-must not contain PVCs, PersistentVolumes, or the OADP
-`DataProtectionApplication`; those resources belong on the target cluster.
-Remove any `LocalVolume` or
-`LVMCluster` custom resource from the seed as applicable. After seed generation
-completes, do not use that seed cluster again. Provision a fresh seed if another
-image is needed.
+[seed image generation procedure](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/edge_computing/image-based-upgrade-for-single-node-openshift-clusters#generating-a-seed-image-for-the-image-based-upgrade-with-the-lifecycle-agent).
+Do not configure persistent volumes or an OADP
+[`DataProtectionApplication`](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/edge_computing/image-based-upgrade-for-single-node-openshift-clusters#seed-image-configuration)
+on the seed. Remove any `LocalVolume` or `LVMCluster` custom resource from the
+seed as applicable.
 
-Fetch the dedicated seed SNO kubeconfig through Succulent, then use it for the
-seed preparation steps:
+Fetch the dedicated seed SNO kubeconfig through
+[Succulent CLI](https://github.com/sebrandon1/succulent-cli) using its
+[`sno kubeconfig` command](https://github.com/sebrandon1/succulent-cli/blob/main/docs/commands.md#sno-kubeconfig),
+then use it for the seed preparation steps:
 
 ```bash
 export SEED_ENV="my-seed-environment"
@@ -449,8 +405,8 @@ oc create secret generic seedgen \
   --type=kubernetes.io/dockerconfigjson
 ```
 
-2. Edit the local `manifests/seedgenerator.yaml` with your registry and target
-version, then apply that file:
+2. Edit the local [SeedGenerator manifest](manifests/seedgenerator.yaml) with
+your registry and target version, then apply that file:
 
 ```bash
 oc apply -f manifests/seedgenerator.yaml
@@ -464,8 +420,9 @@ returns to normal operation after the image is pushed.
 
 ## Building custom images
 
-To build images from feature branches or pull requests, dispatch the workflow
-manually:
+To build images from feature branches or pull requests, dispatch the
+[GitHub Actions workflow](.github/workflows/build-images.yml) manually. See the
+[`gh workflow run` reference](https://cli.github.com/manual/gh_workflow_run):
 
 ```bash
 gh workflow run build-images.yml \
@@ -480,8 +437,9 @@ gh workflow run build-images.yml \
 Use `pull/<number>/head` for fork PR code. Keep `image_tag=auto` so builds
 from different branches do not overwrite one another.
 
-Monitor progress and copy the image references from the completed workflow
-summary:
+Monitor progress with the [`gh run list`](https://cli.github.com/manual/gh_run_list)
+and [`gh run view`](https://cli.github.com/manual/gh_run_view) commands, then
+copy the image references from the completed workflow summary:
 
 ```bash
 gh run list --repo sebrandon1/cert-manager-poc \
@@ -497,7 +455,8 @@ before running either scenario.
 ## Optional: private Quay pull credentials
 
 If the POC repositories are private, create a registry secret and link it to
-the operator service accounts:
+the operator service accounts as described in the OpenShift
+[image pull secret documentation](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/images/managing-images#using-image-pull-secrets):
 
 ```bash
 oc -n cert-manager-operator create secret docker-registry bapalm-quay-pull \
