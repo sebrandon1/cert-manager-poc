@@ -31,6 +31,23 @@ spec:
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
+  name: test-ecdsa-p384
+  namespace: cert-manager-poc
+spec:
+  secretName: test-ecdsa-p384-tls
+  commonName: test-ecdsa-p384.example.com
+  dnsNames:
+  - test-ecdsa-p384.example.com
+  issuerRef:
+    name: selfsigned
+    kind: Issuer
+  privateKey:
+    algorithm: ECDSA
+    size: 384
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
   name: test-rsa
   namespace: cert-manager-poc
 spec:

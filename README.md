@@ -20,10 +20,10 @@ production release artifacts.
 The current build uses these readable tags:
 
 ```bash
-export RECERT_IMAGE=quay.io/bapalm/recert:main-78abf4
-export LCA_IMAGE=quay.io/bapalm/lifecycle-agent-operator:main-cb8304
-export LCA_BUNDLE_IMAGE=quay.io/bapalm/lifecycle-agent-operator-bundle:main-cb8304
-export LCA_CATALOG_IMAGE=quay.io/bapalm/lifecycle-agent-operator-catalog:main-cb8304
+export RECERT_IMAGE=quay.io/bapalm/recert:main-d00524
+export LCA_IMAGE=quay.io/bapalm/lifecycle-agent-operator:main-8d3ff6
+export LCA_BUNDLE_IMAGE=quay.io/bapalm/lifecycle-agent-operator-bundle:main-8d3ff6
+export LCA_CATALOG_IMAGE=quay.io/bapalm/lifecycle-agent-operator-catalog:main-8d3ff6
 export CERT_MANAGER_IMAGE=quay.io/bapalm/cert-manager-operator:master-a5aacc
 export CERT_MANAGER_BUNDLE_IMAGE=quay.io/bapalm/cert-manager-operator-bundle:master-a5aacc
 export CERT_MANAGER_CATALOG_IMAGE=quay.io/bapalm/cert-manager-operator-catalog:master-a5aacc
@@ -35,7 +35,92 @@ replace the variables above.
 
 ---
 
-## Scenario A: ECDSA/RSA certificate preservation across IBU
+## Prepare a ZTP hub and spoke
+
+Use [succulent-cli](https://github.com/sebrandon1/succulent-cli) to inspect the
+plan, submit a ZTP hub-and-spoke provisioning request, and retrieve each
+cluster's kubeconfig. Install the CLI using its
+[installation guide](https://github.com/sebrandon1/succulent-cli/blob/main/docs/installation.md),
+then set the plan name and exact hub and spoke build tags:
+
+```bash
+succulent-cli version
+export ZTP_ENV="my-ztp-plan"
+export HUB_TAG="copy-exact-hub-build-tag"
+export SPOKE_TAG="copy-exact-spoke-build-tag"
+export ZTP_OWNER="your-username"
+export ZTP_EMAIL="you@example.com"
+
+succulent-cli get info --env "$ZTP_ENV"
+```
+
+Review the plan and hardware assignment before requesting a rebuild. Preview
+the request first; the CLI requires `--confirm` for this preview as well, while
+`--dry-run` prevents submission:
+
+```bash
+succulent-cli ztp provision --env "$ZTP_ENV" \
+  --owner "$ZTP_OWNER" --email "$ZTP_EMAIL" \
+  --sno-full-tag "$HUB_TAG" --spoke-full-tag "$SPOKE_TAG" \
+  --type sno --confirm --dry-run
+```
+
+After checking the environment, release tags, and SNO type, submit it by
+removing `--dry-run`:
+
+```bash
+succulent-cli ztp provision --env "$ZTP_ENV" \
+  --owner "$ZTP_OWNER" --email "$ZTP_EMAIL" \
+  --sno-full-tag "$HUB_TAG" --spoke-full-tag "$SPOKE_TAG" \
+  --type sno --confirm
+```
+
+Monitor the environment while Succulent and the ZTP GitOps pipeline provision
+the clusters:
+
+```bash
+succulent-cli get log --env "$ZTP_ENV" | tail -n 30
+succulent-cli watch --env "$ZTP_ENV"
+```
+
+If the spoke needs an installation-time GitOps change before deployment, the
+CLI supports `--stop-before-deployment` so the request can pause for that work.
+Apply the environment's GitOps changes and resume its deployment through the
+documented plan workflow before continuing. For example, the IBU container
+partition must be configured as part of cluster installation; see the
+[IBU prerequisites](#scenario-a-ecdsa-and-rsa-certificate-preservation-across-ibu).
+
+Retrieve and check both credentials separately. The `management` choice is the
+hub; `spoke` is the target SNO:
+
+```bash
+succulent-cli ztp kubeconfig --env "$ZTP_ENV" --choice management
+succulent-cli ztp kubeconfig --env "$ZTP_ENV" --choice spoke
+
+export HUB_KUBECONFIG="$HOME/Downloads/succulent/$ZTP_ENV/ztp-management-kubeconfig"
+export SPOKE_KUBECONFIG="$HOME/Downloads/succulent/$ZTP_ENV/ztp-spoke-kubeconfig"
+
+oc --kubeconfig "$HUB_KUBECONFIG" whoami
+oc --kubeconfig "$HUB_KUBECONFIG" get nodes
+oc --kubeconfig "$HUB_KUBECONFIG" get managedclusters
+oc --kubeconfig "$SPOKE_KUBECONFIG" whoami
+oc --kubeconfig "$SPOKE_KUBECONFIG" get clusterversion
+oc --kubeconfig "$SPOKE_KUBECONFIG" get nodes
+```
+
+Proceed when both kubeconfigs authenticate, the spoke is Ready from the hub,
+and the spoke version and node match the intended test target. Check the hub's
+managed-cluster conditions for `Available=True`. If kubeconfig
+retrieval returns an invalid file or `oc whoami` fails, fix access before
+continuing. Use the spoke kubeconfig for Scenario A:
+
+```bash
+export KUBECONFIG="$SPOKE_KUBECONFIG"
+```
+
+---
+
+## Scenario A: ECDSA and RSA certificate preservation across IBU
 
 This scenario validates that cert-manager-issued ECDSA and RSA certificates
 survive an image-based upgrade. It exercises both
@@ -46,10 +131,26 @@ survive an image-based upgrade. It exercises both
 
 ### Prerequisites
 
-- OpenShift 4.19 or newer SNO spoke, preferably disposable.
-- A seed image at the target version (see [Seed image creation](#seed-image-creation)).
-- OADP / Velero installed and a working `DataProtectionApplication` on the spoke.
+- A SNO spoke using an OCP source and target version supported by the selected
+  Lifecycle Agent and seed image. This flow has been exercised end-to-end from
+  OCP 4.20.2 to 4.22.3.
+- A compatible seed image at the target version (see
+  [Seed image creation](#seed-image-creation)). The seed cluster must match the
+  target's relevant hardware and configuration.
+- A dedicated `/var/lib/containers` partition on both seed and target, created
+  during installation, with the `varlibcontainers` partition label on both.
+- OADP / Velero, a configured `DataProtectionApplication`, an accessible
+  S3-compatible backup bucket, and backup and restore resources on the target
+  spoke.
+- A Lifecycle Agent version compatible with the one used to generate the seed.
+- If RHACM manages the target, the hub must be at least as new as the IBU
+  target release.
 - `oc` logged in with cluster-admin privileges.
+
+Read the [OpenShift IBU preparation and upgrade guide](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/edge_computing/image-based-upgrade-for-single-node-openshift-clusters)
+for the complete version-specific requirements. In particular, the shared
+container partition must be present when the seed and target clusters are
+installed; adding it after provisioning does not satisfy this prerequisite.
 
 ```bash
 export KUBECONFIG="$SPOKE_KUBECONFIG"
@@ -111,25 +212,27 @@ oc -n cert-manager rollout status deploy/cert-manager-cainjector
 
 ### Step 4: Create test certificates (ECDSA and RSA)
 
-Create a self-signed issuer and one certificate of each key type:
+Create self-signed ECDSA P-256, ECDSA P-384, and RSA-2048 certificates. These
+cover the key formats exercised in the successful full-upgrade validation:
 
 ```bash
 oc apply -f https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/test-certificates.yaml
 oc -n cert-manager-poc wait --for=condition=Ready certificate/test-ecdsa --timeout=2m
+oc -n cert-manager-poc wait --for=condition=Ready certificate/test-ecdsa-p384 --timeout=2m
 oc -n cert-manager-poc wait --for=condition=Ready certificate/test-rsa --timeout=2m
 oc -n cert-manager-poc get certificate
 ```
 
-Record the key types for post-upgrade comparison:
+Record the private-key fingerprints before IBU. Compare these exact hashes
+after the upgrade to detect an unexpected key replacement:
 
 ```bash
-echo "=== ECDSA key type (expect: EC) ==="
-oc -n cert-manager-poc get secret test-ecdsa-tls \
-  -o jsonpath='{.data.tls\.key}' | base64 -d | openssl pkey -text -noout | grep 'EC\|Algorithm'
-
-echo "=== RSA key type (expect: RSA) ==="
-oc -n cert-manager-poc get secret test-rsa-tls \
-  -o jsonpath='{.data.tls\.key}' | base64 -d | openssl pkey -text -noout | grep 'RSA\|Algorithm'
+for secret in test-ecdsa-tls test-ecdsa-p384-tls test-rsa-tls; do
+  printf '%s ' "$secret"
+  oc -n cert-manager-poc get secret "$secret" \
+    -o jsonpath='{.data.tls\.key}' | base64 -d | \
+    openssl pkey -outform DER | openssl dgst -sha256
+done | tee "$HOME/ibu-key-checksums.before"
 ```
 
 ### Step 5: Configure the recert image
@@ -158,8 +261,8 @@ Set `SEED_IMAGE` and `TARGET_VERSION` for your seed cluster, then apply the
 `ImageBasedUpgrade` CR:
 
 ```bash
-export SEED_IMAGE="quay.io/<your-repo>/ibu-seed:<target-version>"
-export TARGET_VERSION="4.19.x"
+export SEED_IMAGE="quay.io/<your-repo>/ibu-seed:4.22.3"
+export TARGET_VERSION="4.22.3"
 ```
 
 ```bash
@@ -207,22 +310,33 @@ oc get imagebasedupgrade upgrade -o yaml
 
 ### Step 7: Verify certificates survived
 
-Confirm both TLS secrets are present and contain the expected key types:
+Confirm all three TLS secrets are present, their key fingerprints match the
+pre-upgrade values, and their certificates still have the expected subjects:
 
 ```bash
-echo "=== Check ECDSA cert preserved ==="
-oc -n cert-manager-poc get secret test-ecdsa-tls
-oc -n cert-manager-poc get secret test-ecdsa-tls \
-  -o jsonpath='{.data.tls\.key}' | base64 -d | openssl pkey -text -noout | grep 'EC\|Algorithm'
+for secret in test-ecdsa-tls test-ecdsa-p384-tls test-rsa-tls; do
+  printf '%s ' "$secret"
+  oc -n cert-manager-poc get secret "$secret" \
+    -o jsonpath='{.data.tls\.key}' | base64 -d | \
+    openssl pkey -outform DER | openssl dgst -sha256
+done | tee "$HOME/ibu-key-checksums.after"
+diff -u "$HOME/ibu-key-checksums.before" "$HOME/ibu-key-checksums.after"
 
-echo "=== Check RSA cert preserved ==="
-oc -n cert-manager-poc get secret test-rsa-tls
-oc -n cert-manager-poc get secret test-rsa-tls \
-  -o jsonpath='{.data.tls\.key}' | base64 -d | openssl pkey -text -noout | grep 'RSA\|Algorithm'
-
-echo "=== Certificate status ==="
 oc -n cert-manager-poc get certificate
+oc -n cert-manager-poc get secret test-ecdsa-tls test-ecdsa-p384-tls test-rsa-tls
+for secret in test-ecdsa-tls test-ecdsa-p384-tls test-rsa-tls; do
+  printf '%s ' "$secret"
+  oc -n cert-manager-poc get secret "$secret" \
+    -o jsonpath='{.data.tls\.crt}' | base64 -d | \
+    openssl x509 -noout -subject -ext subjectAltName
+done
+oc -n cert-manager-poc get events --sort-by=.lastTimestamp
+oc -n cert-manager-poc get certificaterequests
 ```
+
+The three key fingerprints should match, certificates should remain `Ready`,
+and there should be no post-upgrade reissuance. Review recent events and
+CertificateRequests for unexpected issuance.
 
 Check the LCA controller logs for recert processing:
 
@@ -298,22 +412,48 @@ operates correctly with no console present.
 ## Seed image creation
 
 The IBU seed image is a snapshot of a running SNO at the target OCP version.
-Create it on a dedicated seed cluster before running Scenario A.
+Create it on a dedicated seed cluster before running Scenario A. Do not use the
+RHACM hub as a seed: the seed cluster must not have RHACM or multicluster engine
+installed. The seed's hardware, CPU topology, machine configuration, network
+family, FIPS setting, registry configuration, and day-2 operators must match
+the target as required by the IBU documentation. The seed must also have the
+`varlibcontainers` partition configured during installation.
+
+Before generating the image, detach the seed from ZTP / RHACM and verify the
+seed-cluster requirements in the official IBU guide. In particular, the seed
+must not contain PVCs, PersistentVolumes, or the OADP
+`DataProtectionApplication`; those resources belong on the target cluster.
+Remove any `LocalVolume` or
+`LVMCluster` custom resource from the seed as applicable. After seed generation
+completes, do not use that seed cluster again. Provision a fresh seed if another
+image is needed.
+
+Fetch the dedicated seed SNO kubeconfig through Succulent, then use it for the
+seed preparation steps:
+
+```bash
+export SEED_ENV="my-seed-environment"
+succulent-cli sno kubeconfig --env "$SEED_ENV"
+export SEED_KUBECONFIG="$HOME/Downloads/succulent/$SEED_ENV/sno-kubeconfig"
+```
 
 1. Create a pull-secret for the registry on the seed cluster:
 
 ```bash
 export KUBECONFIG="$SEED_KUBECONFIG"
+export REGISTRY_AUTH_FILE="$HOME/.docker/config.json"
+
 oc create secret generic seedgen \
   -n openshift-lifecycle-agent \
-  --from-file=.dockerconfigjson=<path-to-pull-secret> \
+  --from-file=.dockerconfigjson="$REGISTRY_AUTH_FILE" \
   --type=kubernetes.io/dockerconfigjson
 ```
 
-2. Edit `manifests/seedgenerator.yaml` with your registry and target version, then apply:
+2. Edit the local `manifests/seedgenerator.yaml` with your registry and target
+version, then apply that file:
 
 ```bash
-oc apply -f https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/seedgenerator.yaml
+oc apply -f manifests/seedgenerator.yaml
 oc get seedgenerator seedimage -w
 ```
 
