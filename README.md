@@ -68,9 +68,9 @@ curl -sL https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/mani
 ```
 
 ```bash
-oc -n openshift-marketplace wait --for=condition=READY \
+oc -n openshift-marketplace wait --for=jsonpath='{.status.connectionState.lastObservedState}'=READY \
   catalogsource/bapalm-cert-manager-poc --timeout=5m
-oc -n openshift-marketplace wait --for=condition=READY \
+oc -n openshift-marketplace wait --for=jsonpath='{.status.connectionState.lastObservedState}'=READY \
   catalogsource/bapalm-lifecycle-agent-poc --timeout=5m
 oc -n openshift-marketplace get packagemanifest \
   cert-manager-operator lifecycle-agent
