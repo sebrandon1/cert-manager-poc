@@ -27,20 +27,6 @@ spec: {}
 apiVersion: operators.coreos.com/v1alpha1
 kind: CatalogSource
 metadata:
-  name: bapalm-cert-manager-poc
-  namespace: openshift-marketplace
-spec:
-  sourceType: grpc
-  image: ${CERT_MANAGER_CATALOG_IMAGE}
-  displayName: bapalm cert-manager POC
-  publisher: bapalm
-  updateStrategy:
-    registryPoll:
-      interval: 10m
----
-apiVersion: operators.coreos.com/v1alpha1
-kind: CatalogSource
-metadata:
   name: bapalm-lifecycle-agent-poc
   namespace: openshift-marketplace
 spec:
