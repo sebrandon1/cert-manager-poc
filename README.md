@@ -17,28 +17,23 @@ production release artifacts.
 
 ## Current image set
 
-The current build uses these readable tags from the [recert](https://quay.io/repository/bapalm/recert),
+The scenarios use these readable test image tags from the [recert](https://quay.io/repository/bapalm/recert),
 [Lifecycle Agent operator](https://quay.io/repository/bapalm/lifecycle-agent-operator),
 [Lifecycle Agent bundle](https://quay.io/repository/bapalm/lifecycle-agent-operator-bundle),
-[Lifecycle Agent catalog](https://quay.io/repository/bapalm/lifecycle-agent-operator-catalog),
-[cert-manager operator](https://quay.io/repository/bapalm/cert-manager-operator),
-[cert-manager bundle](https://quay.io/repository/bapalm/cert-manager-operator-bundle),
-and [cert-manager catalog](https://quay.io/repository/bapalm/cert-manager-operator-catalog)
-repositories:
+[Lifecycle Agent catalog](https://quay.io/repository/bapalm/lifecycle-agent-operator-catalog)
+repositories. Both scenarios install the Red Hat cert-manager Operator from the
+`redhat-operators` catalog.
 
 ```bash
 export RECERT_IMAGE=quay.io/bapalm/recert:main-d00524
 export LCA_IMAGE=quay.io/bapalm/lifecycle-agent-operator:main-8d3ff6
 export LCA_BUNDLE_IMAGE=quay.io/bapalm/lifecycle-agent-operator-bundle:main-8d3ff6
 export LCA_CATALOG_IMAGE=quay.io/bapalm/lifecycle-agent-operator-catalog:main-8d3ff6
-export CERT_MANAGER_IMAGE=quay.io/bapalm/cert-manager-operator:master-a5aacc
-export CERT_MANAGER_BUNDLE_IMAGE=quay.io/bapalm/cert-manager-operator-bundle:master-a5aacc
-export CERT_MANAGER_CATALOG_IMAGE=quay.io/bapalm/cert-manager-operator-catalog:master-a5aacc
 ```
 
 The tag format is `<source-ref>-<first-six-characters-of-source-SHA>`. When a
-new build completes, copy the image references from its workflow summary and
-replace the variables above.
+new build completes, copy the relevant Lifecycle Agent and recert image
+references from its workflow summary and replace the variables above.
 
 ---
 
@@ -100,10 +95,10 @@ oc whoami
 oc version
 ```
 
-### Step 1: Set up CatalogSources and namespaces
+### Step 1: Set up the Lifecycle Agent CatalogSource and namespaces
 
 Set the env vars from the [Current image set](#current-image-set) section above,
-then apply the [catalog sources, namespaces, and operator groups manifest](manifests/catalogs-and-namespaces.yaml):
+then apply the [Lifecycle Agent CatalogSource, namespaces, and operator groups manifest](manifests/catalogs-and-namespaces.yaml):
 
 ```bash
 curl -sL https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/catalogs-and-namespaces.yaml \
@@ -112,11 +107,9 @@ curl -sL https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/mani
 
 ```bash
 oc -n openshift-marketplace wait --for=jsonpath='{.status.connectionState.lastObservedState}'=READY \
-  catalogsource/bapalm-cert-manager-poc --timeout=5m
-oc -n openshift-marketplace wait --for=jsonpath='{.status.connectionState.lastObservedState}'=READY \
   catalogsource/bapalm-lifecycle-agent-poc --timeout=5m
 oc -n openshift-marketplace get packagemanifest \
-  cert-manager-operator lifecycle-agent
+  openshift-cert-manager-operator lifecycle-agent
 ```
 
 ### Step 2: Install lifecycle-agent operator
@@ -137,14 +130,35 @@ oc -n openshift-lifecycle-agent get deploy lifecycle-agent-controller-manager \
   -o jsonpath='{.spec.template.spec.containers[*].image}{"\n"}'
 ```
 
-### Step 3: Install cert-manager-operator
+### Step 3: Install the Red Hat cert-manager Operator
 
 Apply the [cert-manager subscription](manifests/subscription-cert-manager.yaml)
-and [operator configuration](manifests/cert-manager-cr.yaml):
+and [operator configuration](manifests/cert-manager-cr.yaml). The subscription
+uses the Red Hat `openshift-cert-manager-operator` package from `redhat-operators`,
+the `stable-v1` channel, and pins the starting CSV to
+`cert-manager-operator.v1.20.1` with manual InstallPlan approval. The package
+name and CSV name differ. This follows Red Hat's [CLI installation guide](https://docs.redhat.com/en/documentation/openshift_container_platform/4.21/html/security_and_compliance/cert-manager-operator-for-red-hat-openshift)
+and [version-pinning guidance](https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/operators/user-tasks).
+The [Red Hat catalog entry](https://catalog.redhat.com/en/software/containers/cert-manager/cert-manager-operator-rhel9/63d2c619fd1c4f5552a47305)
+lists the operator image release.
 
 ```bash
 oc apply -f https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/subscription-cert-manager.yaml
-oc -n cert-manager-operator get subscription,installplan,csv
+oc -n cert-manager-operator get subscription,installplan
+```
+
+Find and approve the pending InstallPlan that includes
+`cert-manager-operator.v1.20.1` (replace the placeholder with its InstallPlan
+name):
+
+```bash
+oc -n cert-manager-operator get installplan
+oc -n cert-manager-operator patch installplan <installplan-name> \
+  --type merge -p '{"spec":{"approved":true}}'
+oc -n cert-manager-operator wait \
+  --for=jsonpath='{.status.phase}'=Succeeded \
+  csv/cert-manager-operator.v1.20.1 --timeout=5m
+oc -n cert-manager-operator get csv cert-manager-operator.v1.20.1 -o wide
 oc -n cert-manager-operator rollout status deploy/cert-manager-operator-controller-manager
 ```
 
@@ -321,10 +335,11 @@ oc get co console
 oc get deployment -n openshift-console 2>/dev/null || echo "no console deployment"
 ```
 
-### Step 1: Install cert-manager-operator
+### Step 1: Install the Red Hat cert-manager Operator
 
-Set the env vars from the [Current image set](#current-image-set) section, then
-follow Step 1 and Step 3 from Scenario A to apply the CatalogSource, Subscription,
+Set `LCA_CATALOG_IMAGE` from the [Current image set](#current-image-set) section, then
+follow Step 1 and Step 3 from Scenario A to prepare the namespaces and Lifecycle
+Agent CatalogSource and install the pinned Red Hat cert-manager Operator release
 and `CertManager` CR.
 
 ### Step 2: Verify operator health on a consoleless cluster
@@ -332,8 +347,11 @@ and `CertManager` CR.
 Confirm the CSV, deployments, and cert issuance work using only `oc`:
 
 ```bash
-# CSV ready
-oc -n cert-manager-operator get csv -o wide
+# Pinned CSV ready
+oc -n cert-manager-operator wait \
+  --for=jsonpath='{.status.phase}'=Succeeded \
+  csv/cert-manager-operator.v1.20.1 --timeout=5m
+oc -n cert-manager-operator get csv cert-manager-operator.v1.20.1 -o wide
 
 # All three operand deployments healthy
 oc -n cert-manager get deploy,pods
@@ -358,8 +376,9 @@ oc -n cert-manager-poc get secret consoleless-test-tls \
 
 A `Ready=True` [Certificate](https://cert-manager.io/docs/usage/certificate/)
 and a valid x509 subject confirm that cert-manager operates correctly with no
-console present. See [cert-manager-operator PR #424](https://github.com/openshift/cert-manager-operator/pull/424)
-for the consoleless support under test.
+console present. The [OpenShift 4.21 release notes](https://docs.redhat.com/en/documentation/openshift_container_platform/4.21/html/security_and_compliance/cert-manager-operator-for-red-hat-openshift#cert-manager-operator-for-red-hat-openshift-release-notes)
+list the consoleless fix under v1.20.0; this scenario verifies it with the pinned
+v1.20.1 release and tracks [cert-manager-operator PR #424](https://github.com/openshift/cert-manager-operator/pull/424).
 
 ---
 
@@ -447,8 +466,9 @@ gh run list --repo sebrandon1/cert-manager-poc \
 gh run view RUN_ID --repo sebrandon1/cert-manager-poc --web
 ```
 
-Update the `Current image set` variables above with the tags from the summary
-before running either scenario.
+Update the `RECERT_IMAGE` and `LCA_*` variables above with the matching tags from
+the summary before running Scenario A. Scenario B only needs the Lifecycle Agent
+catalog image for the shared setup manifest.
 
 ---
 
@@ -459,13 +479,6 @@ the operator service accounts as described in the OpenShift
 [image pull secret documentation](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/images/managing-images#using-image-pull-secrets):
 
 ```bash
-oc -n cert-manager-operator create secret docker-registry bapalm-quay-pull \
-  --docker-server=quay.io \
-  --docker-username="$QUAY_USERNAME" \
-  --docker-password="$QUAY_TOKEN"
-oc -n cert-manager-operator secrets link cert-manager-operator-controller-manager \
-  bapalm-quay-pull --for=pull
-
 oc -n openshift-lifecycle-agent create secret docker-registry bapalm-quay-pull \
   --docker-server=quay.io \
   --docker-username="$QUAY_USERNAME" \
@@ -481,15 +494,15 @@ Do not commit registry credentials to this repository.
 ## Troubleshooting
 
 ```bash
-# Catalog and package discovery
-oc -n openshift-marketplace describe catalogsource bapalm-cert-manager-poc
-oc -n openshift-marketplace get pods -l olm.catalogSource=bapalm-cert-manager-poc
-oc -n openshift-marketplace get packagemanifest cert-manager-operator -o yaml
+# Red Hat package and Lifecycle Agent catalog discovery
+oc -n openshift-marketplace get packagemanifest openshift-cert-manager-operator -o yaml
+oc -n openshift-marketplace describe catalogsource bapalm-lifecycle-agent-poc
+oc -n openshift-marketplace get pods -l olm.catalogSource=bapalm-lifecycle-agent-poc
 
 # Subscription and install plan
-oc -n cert-manager-operator describe subscription cert-manager-operator
+oc -n cert-manager-operator describe subscription openshift-cert-manager-operator
 oc -n cert-manager-operator get installplan -o yaml
-oc -n cert-manager-operator get csv -o wide
+oc -n cert-manager-operator get csv cert-manager-operator.v1.20.1 -o wide
 
 # Operator events and logs
 oc -n cert-manager-operator get events --sort-by=.lastTimestamp

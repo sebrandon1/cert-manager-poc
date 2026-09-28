@@ -1,11 +1,12 @@
 apiVersion: operators.coreos.com/v1alpha1
 kind: Subscription
 metadata:
-  name: cert-manager-operator
+  name: openshift-cert-manager-operator
   namespace: cert-manager-operator
 spec:
   channel: stable-v1
-  name: cert-manager-operator
-  source: bapalm-cert-manager-poc
+  name: openshift-cert-manager-operator
+  source: redhat-operators
   sourceNamespace: openshift-marketplace
-  installPlanApproval: Automatic
+  startingCSV: cert-manager-operator.v1.20.1
+  installPlanApproval: Manual
