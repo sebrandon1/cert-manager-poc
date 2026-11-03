@@ -1,0 +1,15 @@
+# Same KlusterletConfig as telco-reference PR #1027
+# (telco-hub/configuration/reference-crs/optional/cert-manager/certManagerKlusterletConfig.yaml).
+# The referenced ConfigMap is created from the root CA secret in the guide.
+apiVersion: config.open-cluster-management.io/v1alpha1
+kind: KlusterletConfig
+metadata:
+  name: cert-manager-ca-config
+spec:
+  hubKubeAPIServerConfig:
+    serverVerificationStrategy: UseCustomCABundles
+    trustedCABundles:
+    - name: cert-manager-hub-ca-bundle
+      caBundle:
+        namespace: multicluster-engine
+        name: cert-manager-hub-ca-bundle

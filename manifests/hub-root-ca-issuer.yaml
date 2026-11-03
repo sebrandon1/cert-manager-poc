@@ -1,0 +1,35 @@
+# Self-signed root CA and a CA ClusterIssuer that signs the hub API server
+# certificate. The root lives in the cert-manager namespace, which is the
+# default cluster resource namespace for ClusterIssuer secrets.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: hub-selfsigned-bootstrap
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: hub-root-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: hub-root-ca
+  secretName: hub-root-ca
+  duration: 87600h # 10 years
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    group: cert-manager.io
+    kind: ClusterIssuer
+    name: hub-selfsigned-bootstrap
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: hub-root-ca-issuer
+spec:
+  ca:
+    secretName: hub-root-ca

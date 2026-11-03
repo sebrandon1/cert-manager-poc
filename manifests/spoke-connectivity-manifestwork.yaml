@@ -1,0 +1,18 @@
+# Round-trip probe: the hub asks the spoke's work agent to create a ConfigMap.
+# Render with envsubst so SPOKE_NAME is the ManagedCluster name and
+# PROBE_ID is a unique value for this check.
+apiVersion: work.open-cluster-management.io/v1
+kind: ManifestWork
+metadata:
+  name: cert-rotation-probe
+  namespace: ${SPOKE_NAME}
+spec:
+  workload:
+    manifests:
+    - apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: cert-rotation-probe
+        namespace: default
+      data:
+        probe: "${PROBE_ID}"
