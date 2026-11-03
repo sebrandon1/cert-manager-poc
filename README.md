@@ -43,6 +43,8 @@ If you already have a target SNO, skip provisioning and continue to
 [Scenario A](#scenario-a-ecdsa-and-rsa-certificate-preservation-across-ibu).
 If you want a dedicated ZTP hub and spoke for testing, follow the
 [optional Succulent CLI provisioning guide](docs/ztp-hub-spoke-setup.md).
+[Scenario C](#scenario-c-hub-to-spoke-communication-across-hub-certificate-rotation)
+requires a hub and spoke.
 
 ---
 
@@ -379,6 +381,19 @@ and a valid x509 subject confirm that cert-manager operates correctly with no
 console present. The [OpenShift 4.21 release notes](https://docs.redhat.com/en/documentation/openshift_container_platform/4.21/html/security_and_compliance/cert-manager-operator-for-red-hat-openshift#cert-manager-operator-for-red-hat-openshift-release-notes)
 list the consoleless fix under v1.20.0; this scenario verifies it with the pinned
 v1.20.1 release and tracks [cert-manager-operator PR #424](https://github.com/openshift/cert-manager-operator/pull/424).
+
+---
+
+## Scenario C: hub-to-spoke communication across hub certificate rotation
+
+This scenario confirms that RHACM managed spokes stay connected when
+cert-manager issues and rotates the hub API server certificate, using the
+`KlusterletConfig` from
+[telco-reference PR #1027](https://github.com/openshift-kni/telco-reference/pull/1027).
+It needs a hub with RHACM 2.11 or later and at least one managed spoke. See the
+[hub-spoke certificate rotation guide](docs/hub-spoke-cert-rotation.md) for the
+full procedure: distributing the root CA, switching the hub API certificate,
+triggering rotation, and verifying spoke communication.
 
 ---
 

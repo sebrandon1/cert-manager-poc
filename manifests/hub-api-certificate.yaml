@@ -1,0 +1,21 @@
+# Hub API server serving certificate. Render with envsubst so HUB_API_HOST
+# is the hub API hostname, for example api.hub.example.com.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: hub-api-certificate
+  namespace: openshift-config
+spec:
+  commonName: ${HUB_API_HOST}
+  dnsNames:
+  - ${HUB_API_HOST}
+  isCA: false
+  secretName: hub-api-cert
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    group: cert-manager.io
+    kind: ClusterIssuer
+    name: hub-root-ca-issuer
