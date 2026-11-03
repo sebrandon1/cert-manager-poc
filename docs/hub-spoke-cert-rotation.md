@@ -118,6 +118,35 @@ The steps below follow the brownfield order from PR #1027: distribute the root
 CA to the spoke **before** the hub starts serving a cert-manager certificate.
 Keep the hub's current OpenShift CA in the bundle alongside it.
 
+## Flow overview
+
+The two pass/fail points are the
+[spoke communication checks](#spoke-communication-checks) after Step 6 and
+after each rotation in Step 7.
+
+```mermaid
+flowchart TD
+    P["Prerequisites<br/>env vars and helper functions"] --> S1["Step 1: Record the baseline<br/>served cert, spoke health, lease"]
+    S1 --> S2["Step 2: Install cert-manager v1.20.1<br/>approve the InstallPlan, create the CertManager CR"]
+    S2 --> S3["Step 3: Create the root CA<br/>CN=hub-root-ca and hub-root-ca-issuer"]
+    S3 --> S4a["Step 4: Build the CA bundle<br/>hub-root-ca + kube-apiserver-server-ca"]
+    S4a --> S4b["Create the labeled ConfigMap,<br/>apply the KlusterletConfig,<br/>annotate the ManagedCluster"]
+    S4b --> S4c{"Hub and spoke bootstrap CA<br/>list both CAs, and spoke<br/>AVAILABLE with lease renewing?"}
+    S4c -- no --> R["Troubleshooting:<br/>Recovering a disconnected spoke"]
+    R --> S4c
+    S4c -- yes --> S5["Step 5: Add the root CA<br/>to your hub kubeconfig"]
+    S5 --> S6["Step 6: Issue hub-api-certificate,<br/>patch APIServer namedCertificates,<br/>wait for the served issuer CN=hub-root-ca"]
+    S6 --> C1{"Spoke communication<br/>checks 1-6 pass?"}
+    C1 -- no --> F["Fail: collect Troubleshooting output"]
+    C1 -- yes --> S7["Step 7: Rotate the certificate<br/>cmctl renew, or delete secret hub-api-cert"]
+    S7 --> S7b["Wait for the new serial<br/>to be served"]
+    S7b --> C2{"Spoke communication<br/>checks 1-6 pass?"}
+    C2 -- no --> F
+    C2 -- yes --> M{"Rotated 2-3 times?"}
+    M -- no --> S7
+    M -- yes --> CL["Cleanup: revert the APIServer,<br/>remove the test resources,<br/>confirm the spoke is AVAILABLE"]
+```
+
 ## Step 1: Record the baseline
 
 Capture the certificate the hub API serves now and the spoke's current health:
