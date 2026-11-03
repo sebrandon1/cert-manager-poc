@@ -2,128 +2,31 @@
 
 This scenario checks that RHACM managed spokes stay connected when
 [cert-manager](https://cert-manager.io/docs/) issues and rotates the hub API
-server certificate. It tests the hub-spoke trust configuration from
+server certificate, using the KlusterletConfig from
 [telco-reference PR #1027](https://github.com/openshift-kni/telco-reference/pull/1027)
-([OCPBUGS-85774](https://issues.redhat.com/browse/OCPBUGS-85774)), part of the
-[CNF-21564](https://issues.redhat.com/browse/CNF-21564) acceptance criteria:
-"Hub-spoke communication maintained through hub certificate rotation via
-KlusterletConfig".
+([OCPBUGS-85774](https://issues.redhat.com/browse/OCPBUGS-85774),
+[CNF-21564](https://issues.redhat.com/browse/CNF-21564)).
 
-## Why the KlusterletConfig matters
-
-By default (`UseAutoDetectedCABundle`), ACM puts the CA bundle it detects from
-the hub API server certificate secret into each spoke's klusterlet bootstrap
-kubeconfig. cert-manager stores only the leaf and any intermediate in that
-secret, not the root. Spokes then trust the leaf or intermediate instead of the
-root, and a certificate change can disconnect them.
-
-The [`KlusterletConfig`](https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.15/html-single/clusters/index#set-hub-kube-api-server)
+By default, ACM gives spokes the CA it detects from the hub API certificate
+secret. cert-manager does not store the root CA there, so a certificate change
+can disconnect the spokes. The
+[KlusterletConfig](https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.15/html-single/clusters/index#set-hub-kube-api-server)
 with `serverVerificationStrategy: UseCustomCABundles` gives the spokes the root
-CA (`CA:TRUE`) instead. Any certificate signed by that root, current or renewed,
-is trusted with no intervention. The custom bundle replaces the auto-detected
-CA rather than adding to it, so on an existing spoke it must also include the
-CA of the certificate the hub serves today (see
-[Step 4](#step-4-distribute-the-root-ca-to-the-spoke)).
+CA instead, so they trust every certificate it signs.
 
-## Test inputs
+> **Important:** the custom bundle *replaces* the spoke's trusted CA; it is not
+> added to it. On a hub with connected spokes, the bundle must also hold the CA
+> of the certificate the hub serves today, or the spokes disconnect
+> ([Step 4](#step-4-distribute-the-root-ca-to-the-spoke)).
 
 | Input | Value |
 |-------|-------|
-| cert-manager Operator | `cert-manager-operator.v1.20.1` from the `redhat-operators` catalog (released; no test images needed) |
-| KlusterletConfig and CA ConfigMap | From [PR #1027](https://github.com/openshift-kni/telco-reference/pull/1027); copied into [manifests/hub-klusterletconfig.yaml](../manifests/hub-klusterletconfig.yaml) here |
-| Issuer | A self-signed root CA with a CA `ClusterIssuer`, so the test needs no external ACME server |
-| Validated on | OCP 4.22 SNO hub with ACM/MCE 2.17.3 and an OCP 4.22 multi-node spoke (November 2026); earlier runs on OCP 4.21 hubs with ACM 2.13 ([earlier validation report](https://gist.github.com/sebrandon1/bba27f3e662c16e62fb552ea24c90d02)) |
-
-> **Validation status:** this guide was run end to end on 2026-11-03 against an
-> OCP 4.22 hub (ACM 2.17.3) and a 4.22 spoke. The run covered every step:
-> both rotation methods, all spoke checks, and Cleanup. The spoke stayed
-> `AVAILABLE=True` with no x509 errors through the certificate switch and both
-> rotations. Report any step that does not behave as described.
-
-The telco reference uses an ACME `ClusterIssuer`. The trust mechanism is the
-same for any issuer. The only change is which root CA PEM goes into the
-ConfigMap: for an ACME issuer, use the root of the ACME server's chain.
-
-## Prerequisites
-
-- A hub cluster with RHACM 2.11 or later (`serverVerificationStrategy` was added
-  in 2.11).
-- At least one managed spoke showing `JOINED=True` and `AVAILABLE=True`. The
-  [optional ZTP setup guide](ztp-hub-spoke-setup.md) can provision one.
-- Cluster-admin kubeconfigs for both the hub and the spoke.
-- `oc`, `openssl`, and `envsubst`.
-- Optional: [`cmctl`](https://cert-manager.io/docs/reference/cmctl/) to trigger
-  renewal (`brew install cmctl`, `go install github.com/cert-manager/cmctl/v2@latest`,
-  or download a [release](https://github.com/cert-manager/cmctl/releases)).
-  Without it, use the secret-deletion method in
-  [Step 7](#step-7-trigger-certificate-rotation).
-
-Set the environment for the rest of the guide. Every command runs against the
-hub unless it passes `--kubeconfig "$SPOKE_KUBECONFIG"`.
-
-```bash
-export HUB_KUBECONFIG="/path/to/hub-kubeconfig"
-export SPOKE_KUBECONFIG="/path/to/spoke-kubeconfig"
-export SPOKE_NAME="my-spoke"   # ManagedCluster name on the hub
-
-export KUBECONFIG="$HUB_KUBECONFIG"
-export HUB_API_HOST="$(oc whoami --show-server | sed -E 's#https://([^:/]+).*#\1#')"
-echo "$HUB_API_HOST"
-
-# Print fields of the certificate the hub API is serving right now.
-hub_served_cert() {
-  echo | openssl s_client -connect "$HUB_API_HOST:6443" -servername "$HUB_API_HOST" 2>/dev/null \
-    | openssl x509 -noout "$@"
-}
-
-# Poll the served certificate (every 20s, up to 30 minutes) until its issuer
-# or serial contains the given text. Works while the API is restarting.
-wait_for_served_cert() {
-  for _ in $(seq 1 90); do
-    if hub_served_cert -issuer -serial 2>/dev/null | grep -qiF "$1"; then
-      hub_served_cert -subject -issuer -serial -enddate
-      return 0
-    fi
-    sleep 20
-  done
-  echo "timed out waiting for served certificate matching: $1" >&2
-  return 1
-}
-
-# Print the subject of every certificate in a PEM bundle read from stdin.
-# (openssl x509 alone prints only the first certificate.)
-pem_subjects() {
-  openssl crl2pkcs7 -nocrl -certfile /dev/stdin | openssl pkcs7 -print_certs -noout | grep subject
-}
-
-# CA bundle in the bootstrap kubeconfig the hub sends to the spoke.
-hub_bootstrap_ca() {
-  oc -n "$SPOKE_NAME" get manifestwork "$SPOKE_NAME-klusterlet" \
-    -o jsonpath='{.spec.workload.manifests[?(@.metadata.name=="bootstrap-hub-kubeconfig")].data.kubeconfig}' \
-    | base64 -d | awk '/certificate-authority-data/ {print $2}' | base64 -d
-}
-
-# CA bundle in the bootstrap kubeconfig the spoke actually has.
-spoke_bootstrap_ca() {
-  oc --kubeconfig "$SPOKE_KUBECONFIG" -n open-cluster-management-agent \
-    get secret bootstrap-hub-kubeconfig -o jsonpath='{.data.kubeconfig}' \
-    | base64 -d | awk '/certificate-authority-data/ {print $2}' | base64 -d
-}
-
-oc get managedcluster "$SPOKE_NAME"
-oc -n multicluster-engine get deploy managedcluster-import-controller-v2
-```
-
-The steps below follow the brownfield order from PR #1027: distribute the root
-CA to the spoke **before** the hub starts serving a cert-manager certificate.
-Keep the hub's current OpenShift CA in the bundle alongside it.
+| cert-manager | `cert-manager-operator.v1.20.1` from `redhat-operators` |
+| KlusterletConfig | [manifests/hub-klusterletconfig.yaml](../manifests/hub-klusterletconfig.yaml), the same `spec` as PR #1027 |
+| Issuer | A self-signed root CA with a CA `ClusterIssuer` (PR #1027 uses ACME; the trust mechanism is the same) |
+| Validated on | OCP 4.22 SNO hub with ACM/MCE 2.17.3 and an OCP 4.22 spoke, November 2026 |
 
 ## Flow overview
-
-The two pass/fail points are the
-[spoke communication checks](#spoke-communication-checks) after Step 6 and
-after each rotation in Step 7. If a check fails, see
-[Troubleshooting](#troubleshooting).
 
 ```mermaid
 flowchart TD
@@ -152,32 +55,68 @@ flowchart TD
     rot --> CL["Cleanup"]
 ```
 
-## Step 1: Record the baseline
+## Prerequisites
 
-Capture the certificate the hub API serves now and the spoke's current health:
+- A hub with RHACM 2.11 or later, and a managed spoke that is `JOINED=True`
+  and `AVAILABLE=True`. The [ZTP setup guide](ztp-hub-spoke-setup.md) can
+  provision both.
+- Cluster-admin kubeconfigs for the hub and the spoke.
+- `oc`, `openssl`, `envsubst`, and `curl`.
+- Optional: [`cmctl`](https://cert-manager.io/docs/reference/cmctl/)
+  (`brew install cmctl`) for Step 7.
+
+Download the helper scripts into a working directory, set the environment, and
+load the helpers. All later commands run in this directory, against the hub
+unless they pass `--kubeconfig "$SPOKE_KUBECONFIG"`.
 
 ```bash
-hub_served_cert -subject -issuer -serial -enddate | tee "$HOME/hub-api-cert.baseline"
+mkdir -p ~/hub-spoke-test && cd ~/hub-spoke-test
+base=https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main
+curl -sL -O "$base/scripts/hub-spoke-helpers.sh" -O "$base/scripts/spoke-checks.sh"
+chmod +x spoke-checks.sh
 
-oc get managedcluster "$SPOKE_NAME"
-oc -n "$SPOKE_NAME" get managedclusteraddons
-oc -n "$SPOKE_NAME" get lease managed-cluster-lease -o jsonpath='{.spec.renewTime}{"\n"}'
+export HUB_KUBECONFIG="/path/to/hub-kubeconfig"
+export SPOKE_KUBECONFIG="/path/to/spoke-kubeconfig"
+export SPOKE_NAME="my-spoke"   # ManagedCluster name on the hub
+source ./hub-spoke-helpers.sh
 ```
+
+[`hub-spoke-helpers.sh`](../scripts/hub-spoke-helpers.sh) sets `KUBECONFIG`
+and `HUB_API_HOST`, and defines `hub_served_cert`, `wait_for_served_cert`,
+`pem_subjects`, `hub_bootstrap_ca`, `spoke_bootstrap_ca`, and `issued_serial`.
+
+[`spoke-checks.sh`](../scripts/spoke-checks.sh) runs the six spoke
+communication checks and prints `PASS` or `FAIL` for each. It takes about two
+minutes:
+
+| # | Check |
+|---|-------|
+| 1 | The hub reports the spoke `AVAILABLE` |
+| 2 | The spoke's `managed-cluster-lease` renews |
+| 3 | Every add-on is `AVAILABLE` |
+| 4 | A new ManifestWork reaches the spoke (creates a ConfigMap there) |
+| 5 | No `x509` errors in any klusterlet pod |
+| 6 | The spoke's bootstrap CA matches the hub's and trusts the served certificate's issuer |
+
+## Step 1: Record the baseline
+
+```bash
+hub_served_cert -subject -issuer -serial -enddate | tee hub-api-cert.baseline
+./spoke-checks.sh
+```
+
+All checks should pass before you start.
 
 ## Step 2: Install cert-manager on the hub
 
-Create the operator namespace and OperatorGroup, then reuse the pinned
-subscription and `CertManager` CR from Scenario A:
-
 ```bash
-oc apply -f https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/hub-cert-manager-namespace.yaml
-oc apply -f https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/subscription-cert-manager.yaml
+oc apply -f "$base/manifests/hub-cert-manager-namespace.yaml"
+oc apply -f "$base/manifests/subscription-cert-manager.yaml"
 oc -n cert-manager-operator get installplan
 ```
 
-Approve the InstallPlan for `cert-manager-operator.v1.20.1` and create the
-operand, the same way as
-[Scenario A Step 3](../README.md#step-3-install-the-red-hat-cert-manager-operator):
+Approve the InstallPlan for `cert-manager-operator.v1.20.1`, then create the
+operand:
 
 ```bash
 oc -n cert-manager-operator patch installplan <installplan-name> \
@@ -185,74 +124,59 @@ oc -n cert-manager-operator patch installplan <installplan-name> \
 oc -n cert-manager-operator wait --for=jsonpath='{.status.phase}'=Succeeded \
   csv/cert-manager-operator.v1.20.1 --timeout=5m
 
-oc apply -f https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/cert-manager-cr.yaml
-oc -n cert-manager rollout status deploy/cert-manager
-oc -n cert-manager rollout status deploy/cert-manager-webhook
-oc -n cert-manager rollout status deploy/cert-manager-cainjector
+oc apply -f "$base/manifests/cert-manager-cr.yaml"
+for d in cert-manager cert-manager-webhook cert-manager-cainjector; do
+  oc -n cert-manager rollout status deploy/$d
+done
 ```
 
 ## Step 3: Create the root CA and issuer
 
-The [root CA manifest](../manifests/hub-root-ca-issuer.yaml) creates a
-self-signed root CA (`CN=hub-root-ca`) and a CA `ClusterIssuer` named
-`hub-root-ca-issuer` that signs with it:
+[hub-root-ca-issuer.yaml](../manifests/hub-root-ca-issuer.yaml) creates a
+self-signed root CA (`CN=hub-root-ca`) and a `ClusterIssuer` named
+`hub-root-ca-issuer`:
 
 ```bash
-oc apply -f https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/hub-root-ca-issuer.yaml
+oc apply -f "$base/manifests/hub-root-ca-issuer.yaml"
 oc -n cert-manager wait --for=condition=Ready certificate/hub-root-ca --timeout=2m
 oc wait --for=condition=Ready clusterissuer/hub-root-ca-issuer --timeout=2m
 
-oc -n cert-manager get secret hub-root-ca -o jsonpath='{.data.ca\.crt}' | base64 -d > "$HOME/hub-root-ca.pem"
-openssl x509 -in "$HOME/hub-root-ca.pem" -noout -subject -ext basicConstraints
+oc -n cert-manager get secret hub-root-ca -o jsonpath='{.data.ca\.crt}' | base64 -d > hub-root-ca.pem
+openssl x509 -in hub-root-ca.pem -noout -subject -ext basicConstraints
 ```
 
-The output should show `subject=CN=hub-root-ca` and `CA:TRUE`.
+**Pass:** `subject=CN=hub-root-ca` and `CA:TRUE`.
 
 ## Step 4: Distribute the root CA to the spoke
 
-With `UseCustomCABundles`, the ConfigMap's bundle **replaces** the CA in the
-spoke's bootstrap kubeconfig. It is not added to the CA the spoke already
-trusts. The klusterlet agent restarts when its bootstrap kubeconfig changes,
-and from then on trusts only what is in the bundle. The hub is still serving
-its OpenShift-managed certificate at this point. A bundle holding only
-`hub-root-ca` would therefore disconnect the spoke with
-`x509: certificate signed by unknown authority`.
-
-So build the bundle from the root CA **plus** the OpenShift API serving CAs
-the hub uses today. The spoke then trusts both the current certificate and the
-cert-manager one:
+Build the bundle from the root CA **plus** the OpenShift API serving CAs the
+hub still uses, so the spoke trusts both the current certificate and the
+cert-manager one. Then create the labeled ConfigMap (the label value must be
+`"true"`), apply the KlusterletConfig, and annotate the spoke:
 
 ```bash
 oc -n openshift-kube-apiserver get configmap kube-apiserver-server-ca \
-  -o jsonpath='{.data.ca-bundle\.crt}' > "$HOME/ocp-api-server-ca.pem"
-cat "$HOME/hub-root-ca.pem" "$HOME/ocp-api-server-ca.pem" > "$HOME/hub-ca-bundle.pem"
-pem_subjects < "$HOME/hub-ca-bundle.pem"
-```
+  -o jsonpath='{.data.ca-bundle\.crt}' > ocp-api-server-ca.pem
+cat hub-root-ca.pem ocp-api-server-ca.pem > hub-ca-bundle.pem
+pem_subjects < hub-ca-bundle.pem
 
-The output lists `CN=hub-root-ca` and the `kube-apiserver-*-signer` CAs.
-
-Create the CA bundle ConfigMap. The label value must be the string `"true"`;
-the import controller ignores an empty value.
-
-```bash
 oc -n multicluster-engine create configmap cert-manager-hub-ca-bundle \
-  --from-file=ca-bundle.crt="$HOME/hub-ca-bundle.pem" \
-  --dry-run=client -o yaml | oc apply -f -
+  --from-file=ca-bundle.crt=hub-ca-bundle.pem --dry-run=client -o yaml | oc apply -f -
 oc -n multicluster-engine label configmap cert-manager-hub-ca-bundle \
   import.open-cluster-management.io/ca-bundle=true --overwrite
-```
 
-Apply the [KlusterletConfig](../manifests/hub-klusterletconfig.yaml) and attach
-it to the spoke:
-
-```bash
-oc apply -f https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/hub-klusterletconfig.yaml
+oc apply -f "$base/manifests/hub-klusterletconfig.yaml"
 oc annotate managedcluster "$SPOKE_NAME" \
   agent.open-cluster-management.io/klusterlet-config=cert-manager-ca-config --overwrite
 ```
 
-For a new ZTP spoke, set the annotation through the ClusterInstance instead, as
-the example ClusterInstance CRs in PR #1027 show:
+If the spoke already selects a KlusterletConfig (check with
+`oc get managedcluster "$SPOKE_NAME" -o jsonpath='{.metadata.annotations.agent\.open-cluster-management\.io/klusterlet-config}'`),
+don't overwrite the annotation, or its other settings (proxy, node placement)
+are lost. Add the `hubKubeAPIServerConfig` section to that KlusterletConfig
+instead.
+
+For a new ZTP spoke, set the annotation in the ClusterInstance instead:
 
 ```yaml
 spec:
@@ -261,72 +185,48 @@ spec:
       agent.open-cluster-management.io/klusterlet-config: "cert-manager-ca-config"
 ```
 
-The import controller regenerates the bootstrap kubeconfig in the spoke's
-klusterlet ManifestWork (`<cluster>-klusterlet` in the cluster's namespace),
-usually within a minute. The work agent then applies it on the spoke, and the
-klusterlet agent restarts. Check the hub side first, then the spoke side:
+Within about a minute, the import controller regenerates the spoke's bootstrap
+kubeconfig, the spoke applies it, and the klusterlet agent restarts once. Then
+run the checks:
 
 ```bash
-hub_bootstrap_ca | pem_subjects
-spoke_bootstrap_ca | pem_subjects
+./spoke-checks.sh
 ```
 
-**Pass:** both list `CN=hub-root-ca` and the `kube-apiserver-*-signer` CAs.
-
-Optionally confirm in the import controller logs. It runs two replicas and only
-one logs the regeneration, so check both:
-
-```bash
-for p in $(oc -n multicluster-engine get pod -o name | grep managedcluster-import-controller); do
-  oc -n multicluster-engine logs "$p" --since=10m | grep "create a new bootstrap kubeconfig for the managed cluster $SPOKE_NAME"
-done
-```
-
-Then confirm the spoke reconnected after the agent restart. The lease must be
-renewed after the restart:
-
-```bash
-oc wait managedcluster "$SPOKE_NAME" \
-  --for=condition=ManagedClusterConditionAvailable=True --timeout=10m
-oc -n "$SPOKE_NAME" get lease managed-cluster-lease -o jsonpath='{.spec.renewTime}{"\n"}'
-oc -n "$SPOKE_NAME" get managedclusteraddons
-```
-
-Do not continue until all of this passes. Switching the hub certificate before
-the spoke trusts the root CA disconnects the spoke. If the spoke goes
-`AVAILABLE=Unknown` here, see
+**Pass:** all checks pass, and check 6 lists `CN=hub-root-ca` alongside the
+`kube-apiserver-*-signer` CAs. Do not continue until this passes. If the spoke
+disconnects, see
 [Recovering a disconnected spoke](#recovering-a-disconnected-spoke).
 
 ## Step 5: Keep your hub kubeconfig working
 
-Once the hub API serves a certificate from `hub-root-ca`, the CA in your admin
-kubeconfig no longer verifies it and `oc` fails with
-`x509: certificate signed by unknown authority`. Back up the kubeconfig and add
-the root CA to its trusted CAs before switching:
+Once the hub serves a `hub-root-ca` certificate, `oc` with your current
+kubeconfig fails with `x509: certificate signed by unknown authority`. Back up
+the kubeconfig and add the root CA to it:
 
 ```bash
 cp "$HUB_KUBECONFIG" "$HUB_KUBECONFIG.bak"
 HUB_CLUSTER="$(oc config view --minify -o jsonpath='{.clusters[0].name}')"
 {
   oc config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d
-  cat "$HOME/hub-root-ca.pem"
-} > "$HOME/hub-kubeconfig-ca.pem"
+  cat hub-root-ca.pem
+} > hub-kubeconfig-ca.pem
 oc config set "clusters.$HUB_CLUSTER.certificate-authority-data" \
-  "$(base64 < "$HOME/hub-kubeconfig-ca.pem" | tr -d '\n')"
+  "$(base64 < hub-kubeconfig-ca.pem | tr -d '\n')"
 oc whoami
 ```
 
-If your kubeconfig uses `certificate-authority` (a file path) instead of
-`certificate-authority-data`, append the root CA to that file instead.
+If your kubeconfig uses `certificate-authority` (a file path) instead, append
+the root CA to that file.
 
 ## Step 6: Serve a cert-manager certificate from the hub API
 
-Issue the [hub API certificate](../manifests/hub-api-certificate.yaml) in
-`openshift-config`, then point the `APIServer` at it:
+Issue the [hub API certificate](../manifests/hub-api-certificate.yaml) and
+point the `APIServer` at it. The patch replaces any existing
+`namedCertificates`; if the hub already has some, edit the list instead.
 
 ```bash
-curl -sL https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/hub-api-certificate.yaml \
-  | envsubst | oc apply -f -
+curl -sL "$base/manifests/hub-api-certificate.yaml" | envsubst | oc apply -f -
 oc -n openshift-config wait --for=condition=Ready certificate/hub-api-certificate --timeout=2m
 
 oc patch apiserver cluster --type merge -p "{
@@ -337,193 +237,65 @@ oc patch apiserver cluster --type merge -p "{
 }"
 ```
 
-The patch replaces any existing `namedCertificates`. If the hub already has
-named certificates, edit the list instead of patching it.
-
-The kube-apiserver rolls out a new revision and the API is briefly
-unavailable. On a 4.22 SNO hub the new certificate was served about 2 minutes
-after the patch and the rollout finished about a minute later. On a multi-node
-hub the masters update one at a time, which takes longer. Wait until the hub serves the new
-certificate, then until the rollout finishes:
+The kube-apiserver rolls out a new revision (about 3 minutes on SNO, longer on
+a multi-node hub), and the API is briefly unavailable. Wait for the new
+certificate and the rollout, then run the checks:
 
 ```bash
 wait_for_served_cert hub-root-ca
-oc wait co/kube-apiserver --for=condition=Progressing=False --timeout=30m
+oc wait co/kube-apiserver --for=condition=Progressing=False --timeout=30m   # rerun on connection errors
+./spoke-checks.sh
 ```
 
-If `oc wait` fails with connection errors while the API restarts, run it
-again.
-
-**Pass:** the issuer is `CN=hub-root-ca`. Then run the
-[spoke communication checks](#spoke-communication-checks). This is the first
-pass/fail point: the spoke must stay connected when the hub switches from the
-OpenShift-managed certificate to the cert-manager one.
+**Pass (first pass/fail point):** the served issuer is `CN=hub-root-ca` and
+all checks pass.
 
 ## Step 7: Trigger certificate rotation
 
-Record the current serial, then force cert-manager to reissue the certificate.
+Force cert-manager to reissue the certificate with either option. Both create
+a new private key (`rotationPolicy: Always`):
 
 ```bash
-oc -n openshift-config get secret hub-api-cert -o jsonpath='{.data.tls\.crt}' \
-  | base64 -d | openssl x509 -noout -serial | tee "$HOME/hub-api-serial.before"
+issued_serial | tee hub-api-serial.before
+
+cmctl renew hub-api-certificate -n openshift-config      # Option A: normal renewal path
+# oc -n openshift-config delete secret hub-api-cert      # Option B: delete the secret
 ```
 
-**Option A (preferred): `cmctl renew`.** This marks the `Certificate` for
-reissuance through the normal renewal path, the same as an expiry-driven
-renewal:
-
-```bash
-cmctl renew hub-api-certificate -n openshift-config
-```
-
-**Option B: delete the secret.** cert-manager notices the missing secret and
-reissues it. The earlier validation used this method:
-
-```bash
-oc -n openshift-config delete secret hub-api-cert
-```
-
-Both options create a new private key, because the certificate sets
-`rotationPolicy: Always`. Wait for the reissue, then for the hub to serve the
-new serial:
+Wait for the new serial to be served, then run the checks:
 
 ```bash
 oc -n openshift-config wait --for=condition=Ready certificate/hub-api-certificate --timeout=5m
-oc -n openshift-config get certificaterequests
-oc -n openshift-config get secret hub-api-cert -o jsonpath='{.data.tls\.crt}' \
-  | base64 -d | openssl x509 -noout -serial | tee "$HOME/hub-api-serial.after"
-if cmp -s "$HOME/hub-api-serial.before" "$HOME/hub-api-serial.after"; then
-  echo "FAIL: serial did not change"
-else
-  echo "serial changed"
-fi
-
-wait_for_served_cert "$(cut -d= -f2 "$HOME/hub-api-serial.after")"
-oc get co kube-apiserver
+issued_serial | tee hub-api-serial.after
+cmp -s hub-api-serial.before hub-api-serial.after && echo "FAIL: serial did not change"
+wait_for_served_cert "$(cat hub-api-serial.after)"
+./spoke-checks.sh
 ```
 
-Unlike Step 6, a rotation does not roll out a new kube-apiserver revision. The
-kube-apiserver reloads the changed secret in place, and on the 4.22 test hub
-the new serial was served within about 15 seconds of issuance, with no API
-outage. `kube-apiserver` should stay `AVAILABLE=True`, `PROGRESSING=False`.
+A rotation does not roll out a new kube-apiserver revision. The new serial is
+served within seconds, with no API outage.
 
-**Pass:** the hub serves the serial in `hub-api-serial.after`. Run the
-[spoke communication checks](#spoke-communication-checks) again. This is the
-second pass/fail point.
+**Pass (second pass/fail point):** the hub serves the new serial and all
+checks pass. Repeat Step 7 two or three times, using both options.
 
-Repeat Step 7 two or three times to confirm the result holds across
-consecutive rotations.
-
-To exercise expiry-driven renewal instead, set `spec.duration: 1h` and
-`spec.renewBefore: 30m` on the certificate. cert-manager then renews it every
-30 minutes, and the kube-apiserver picks up each new certificate.
-
-## Spoke communication checks
-
-Run all of these after Step 6 and after each rotation in Step 7.
-
-**1. ManagedCluster health (hub).** `JOINED` and `AVAILABLE` must both be
-`True`:
-
-```bash
-oc get managedcluster "$SPOKE_NAME"
-oc wait managedcluster "$SPOKE_NAME" \
-  --for=condition=ManagedClusterConditionAvailable=True --timeout=10m
-```
-
-**2. Lease renewal (hub).** The spoke's registration agent renews this lease
-about once a minute. Run the command twice, a minute or more apart; the
-timestamp must advance:
-
-```bash
-oc -n "$SPOKE_NAME" get lease managed-cluster-lease -o jsonpath='{.spec.renewTime}{"\n"}'
-```
-
-**3. Add-on health (hub).** Every add-on must report `AVAILABLE=True`:
-
-```bash
-oc -n "$SPOKE_NAME" get managedclusteraddons
-```
-
-**4. ManifestWork round trip (hub to spoke).** This proves the hub can deliver
-new work to the spoke after the rotation. The
-[probe manifest](../manifests/spoke-connectivity-manifestwork.yaml) creates a
-ConfigMap on the spoke:
-
-```bash
-export PROBE_ID="$(date +%s)"
-curl -sL https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/spoke-connectivity-manifestwork.yaml \
-  | envsubst | oc apply -f -
-oc -n "$SPOKE_NAME" wait manifestwork/cert-rotation-probe --for=condition=Available --timeout=5m
-oc --kubeconfig "$SPOKE_KUBECONFIG" -n default get configmap cert-rotation-probe \
-  -o jsonpath='{.data.probe}{"\n"}'
-echo "expected: $PROBE_ID"
-oc -n "$SPOKE_NAME" delete manifestwork cert-rotation-probe
-```
-
-**5. No TLS errors in the klusterlet (spoke).** Check every pod in the agent
-namespace. The agent deployment runs several replicas, and
-`oc logs deploy/...` reads only one of them, which may not be the leader:
-
-```bash
-for p in $(oc --kubeconfig "$SPOKE_KUBECONFIG" -n open-cluster-management-agent get pod -o name); do
-  echo "== $p"
-  oc --kubeconfig "$SPOKE_KUBECONFIG" -n open-cluster-management-agent logs "$p" \
-    --all-containers --since=15m | grep -iE 'x509|unknown authority|tls: ' || echo "no TLS errors"
-done
-```
-
-A short burst of connection-refused errors during the kube-apiserver rollout is
-expected. `x509: certificate signed by unknown authority` is a failure.
-
-**6. Bootstrap trust unchanged (hub and spoke).** Both bootstrap kubeconfigs
-should still carry the bundle from Step 4, unchanged by the rotation:
-
-```bash
-hub_bootstrap_ca | pem_subjects
-spoke_bootstrap_ca | pem_subjects
-```
-
-### Pass criteria
-
-| Check | Expected |
-|-------|----------|
-| Bootstrap kubeconfig CA, hub and spoke (Step 4, check 6) | `CN=hub-root-ca` plus the `kube-apiserver-*-signer` CAs |
-| Served hub API certificate (Steps 6–7) | Issuer `CN=hub-root-ca`; new serial after each rotation |
-| ManagedCluster | `JOINED=True`, `AVAILABLE=True` within 10 minutes of each rollout finishing |
-| Lease | `renewTime` advances |
-| Add-ons | All `AVAILABLE=True` |
-| ManifestWork probe | `Available`; ConfigMap on spoke holds the current `PROBE_ID` |
-| Klusterlet logs | No `x509` / `unknown authority` errors |
-| Manual intervention | None: no re-import and no ManifestWork edits |
+To test expiry-driven renewal instead, set `spec.duration: 1h` and
+`spec.renewBefore: 30m` on the certificate.
 
 ## Cleanup
 
-Restore the hub to its OpenShift-managed API certificate without disconnecting
-the spoke. The spoke still trusts the OpenShift API serving CAs from the Step 4
-bundle. Confirm that before reverting:
-
-```bash
-spoke_bootstrap_ca | pem_subjects
-```
-
-If the output lists only `CN=hub-root-ca` (for example, because the bundle was
-narrowed to the root CA after Step 6), rebuild the combined bundle as in
-Step 4 and wait for the spoke to pick it up before continuing.
-
-Revert the API server and wait for the rollout:
+Revert the hub to its OpenShift-managed certificate. The spoke still trusts the
+OpenShift CAs from the Step 4 bundle; confirm with `spoke_bootstrap_ca |
+pem_subjects` first.
 
 ```bash
 oc patch apiserver cluster --type json -p '[{"op":"remove","path":"/spec/servingCerts/namedCertificates"}]'
-wait_for_served_cert "$(sed -n 's/^issuer=//p' "$HOME/hub-api-cert.baseline")"
+wait_for_served_cert "$(sed -n 's/^issuer=//p' hub-api-cert.baseline)"
 oc wait co/kube-apiserver --for=condition=Progressing=False --timeout=30m
 cp "$HUB_KUBECONFIG.bak" "$HUB_KUBECONFIG"
-oc get managedcluster "$SPOKE_NAME"
 ```
 
-Once the spoke is `AVAILABLE=True`, remove the test resources. cert-manager
-does not delete a certificate's secret when the `Certificate` is deleted, so
-delete the secrets explicitly:
+Remove the test resources. cert-manager does not delete secrets with their
+`Certificate`, so delete those too:
 
 ```bash
 oc annotate managedcluster "$SPOKE_NAME" agent.open-cluster-management.io/klusterlet-config-
@@ -531,103 +303,75 @@ oc delete klusterletconfig cert-manager-ca-config
 oc -n multicluster-engine delete configmap cert-manager-hub-ca-bundle
 oc -n openshift-config delete certificate hub-api-certificate
 oc -n openshift-config delete secret hub-api-cert
-oc delete -f https://raw.githubusercontent.com/sebrandon1/cert-manager-poc/main/manifests/hub-root-ca-issuer.yaml
+oc delete -f "$base/manifests/hub-root-ca-issuer.yaml"
 oc -n cert-manager delete secret hub-root-ca
 ```
 
-Removing the annotation puts the spoke back on the auto-detected CA bundle.
-The klusterlet agent restarts once more. Confirm the spoke reconnects:
+Removing the annotation returns the spoke to the auto-detected CA, and the
+klusterlet agent restarts once more. Wait two minutes, then confirm:
 
 ```bash
-spoke_bootstrap_ca | pem_subjects   # kube-apiserver-*-signer CAs, no hub-root-ca
-oc wait managedcluster "$SPOKE_NAME" \
-  --for=condition=ManagedClusterConditionAvailable=True --timeout=10m
-oc -n "$SPOKE_NAME" get managedclusteraddons
+./spoke-checks.sh
 ```
 
 ## Troubleshooting
 
 ```bash
-# Import controller: did it pick up the ConfigMap and KlusterletConfig?
+# Trust configuration on the hub
 oc -n multicluster-engine get configmap cert-manager-hub-ca-bundle --show-labels
 oc get klusterletconfig cert-manager-ca-config -o yaml
 oc get managedcluster "$SPOKE_NAME" -o jsonpath='{.metadata.annotations}{"\n"}'
 hub_bootstrap_ca | pem_subjects
-# The import controller runs two replicas; check both.
+spoke_bootstrap_ca | pem_subjects
+
+# Import controller: two replicas, check both
 for p in $(oc -n multicluster-engine get pod -o name | grep managedcluster-import-controller); do
-  oc -n multicluster-engine logs "$p" --since=30m | grep -i "$SPOKE_NAME"
+  oc -n multicluster-engine logs "$p" --since=30m | grep -i "bootstrap kubeconfig.*$SPOKE_NAME"
 done
 
-# cert-manager issuance
+# cert-manager and the kube-apiserver
 oc -n openshift-config describe certificate hub-api-certificate
-oc -n openshift-config get certificaterequests
 oc -n cert-manager logs deploy/cert-manager --since=30m
-
-# kube-apiserver rollout
 oc get co kube-apiserver
 oc get apiserver cluster -o jsonpath='{.spec.servingCerts}{"\n"}'
 
-# Spoke klusterlet status
-oc --kubeconfig "$SPOKE_KUBECONFIG" get klusterlet klusterlet -o yaml
+# Spoke klusterlet
 oc --kubeconfig "$SPOKE_KUBECONFIG" -n open-cluster-management-agent get pods
 ```
 
 ### Recovering a disconnected spoke
 
-Symptom: `AVAILABLE=Unknown` on the hub, the `managed-cluster-lease` stops
-renewing, and the spoke's klusterlet agent logs
-`x509: certificate signed by unknown authority`. Compare what the spoke trusts
-with what the hub serves:
+**Symptom:** the hub shows the spoke `AVAILABLE=Unknown`, its lease stops
+renewing, and the klusterlet logs `x509: certificate signed by unknown
+authority`. Compare `spoke_bootstrap_ca | pem_subjects` with
+`hub_served_cert -issuer`: the served issuer is missing from the spoke's
+bundle.
+
+The spoke cannot recover on its own, because the fix reaches it through a
+ManifestWork it can no longer fetch. To recover:
+
+1. Fix the ConfigMap on the hub as in Step 4.
+2. **Wait** until `hub_bootstrap_ca | pem_subjects` includes the served issuer.
+   This can take several minutes. If you skip the wait, the spoke's work agent
+   re-applies the old bundle as soon as the spoke reconnects, and it
+   disconnects again.
+3. Copy that bundle into the spoke and delete the agent pods. Use
+   `delete pod`; `oc rollout restart` is reverted by the klusterlet operator.
 
 ```bash
-spoke_bootstrap_ca | pem_subjects
-hub_served_cert -issuer
-```
-
-If the served certificate's issuer is missing from the spoke's bundle, the
-spoke cannot recover on its own. The hub delivers the bootstrap kubeconfig
-through a ManifestWork, and the spoke cannot fetch it while the TLS check
-fails. This happens if the Step 4 bundle held only `hub-root-ca`, or if the hub
-was switched before the spoke trusted the root CA.
-
-First fix the bundle on the hub, as in Step 4. Then **wait until the hub's
-klusterlet ManifestWork carries the fixed bundle**. The output must include the
-issuer of the certificate the hub serves (`hub_served_cert -issuer`):
-
-```bash
-hub_bootstrap_ca | pem_subjects
-```
-
-The import controller can take several minutes to regenerate the ManifestWork
-for a disconnected spoke. Do not skip this wait. As soon as the spoke
-reconnects, its work agent applies whatever the ManifestWork holds. If that is
-still the old bundle, it overwrites the repair and the spoke disconnects again.
-
-Then copy the ManifestWork's bundle into the spoke's bootstrap kubeconfig, and
-delete the agent pods so they load it:
-
-```bash
-hub_bootstrap_ca > "$HOME/recovery-ca.pem"
+hub_bootstrap_ca > recovery-ca.pem
 oc --kubeconfig "$SPOKE_KUBECONFIG" -n open-cluster-management-agent \
   get secret bootstrap-hub-kubeconfig -o jsonpath='{.data.kubeconfig}' \
-  | base64 -d > "$HOME/spoke-bootstrap.kubeconfig"
-cp "$HOME/spoke-bootstrap.kubeconfig" "$HOME/spoke-bootstrap.kubeconfig.bak"
-BOOT_CLUSTER="$(oc --kubeconfig "$HOME/spoke-bootstrap.kubeconfig" config view -o jsonpath='{.clusters[0].name}')"
-oc --kubeconfig "$HOME/spoke-bootstrap.kubeconfig" config set \
-  "clusters.$BOOT_CLUSTER.certificate-authority-data" \
-  "$(base64 < "$HOME/recovery-ca.pem" | tr -d '\n')"
+  | base64 -d > spoke-bootstrap.kubeconfig
+cp spoke-bootstrap.kubeconfig spoke-bootstrap.kubeconfig.bak
+BOOT_CLUSTER="$(oc --kubeconfig spoke-bootstrap.kubeconfig config view -o jsonpath='{.clusters[0].name}')"
+oc --kubeconfig spoke-bootstrap.kubeconfig config set \
+  "clusters.$BOOT_CLUSTER.certificate-authority-data" "$(base64 < recovery-ca.pem | tr -d '\n')"
 oc --kubeconfig "$SPOKE_KUBECONFIG" -n open-cluster-management-agent \
-  set data secret/bootstrap-hub-kubeconfig --from-file=kubeconfig="$HOME/spoke-bootstrap.kubeconfig"
+  set data secret/bootstrap-hub-kubeconfig --from-file=kubeconfig=spoke-bootstrap.kubeconfig
 oc --kubeconfig "$SPOKE_KUBECONFIG" -n open-cluster-management-agent \
   delete pod -l app=klusterlet-agent
-oc wait managedcluster "$SPOKE_NAME" \
-  --for=condition=ManagedClusterConditionAvailable=True --timeout=10m
 ```
 
-Run the [spoke communication checks](#spoke-communication-checks) afterwards,
-waiting at least two minutes. A spoke that briefly shows `AVAILABLE=True` can
-still drop again if the race above happened.
-
-Delete the pods; don't use `oc rollout restart`. The klusterlet operator
-reverts the restart annotation on its deployment, so the old pods keep running
-with the old CA. Re-importing the spoke also works, but takes longer.
+Wait two minutes, then run `./spoke-checks.sh`. Re-importing the spoke also
+works.
